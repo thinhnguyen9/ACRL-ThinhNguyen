@@ -39,6 +39,21 @@ class Quadrotor1():
         # Model dimensions
         self.Nx = 16
         self.Nu = 4
+        self.Ny = 9  # can measure x, xd, y, yd, z, zd, roll, pitch, yaw
+        
+        # dx = Ax + Bu + Gw
+        # y = Cx + v
+        self.G = np.eye(self.Nx)
+        self.C = np.zeros((self.Ny, self.Nx))
+        self.C[0,0] = 1.
+        self.C[1,1] = 1.
+        self.C[2,2] = 1.
+        self.C[3,3] = 1.
+        self.C[4,4] = 1.
+        self.C[5,5] = 1.
+        self.C[6,6] = 1.
+        self.C[7,7] = 1.
+        self.C[8,8] = 1.
 
         # Model params
         self.l = l
@@ -57,6 +72,12 @@ class Quadrotor1():
         self.u_h = self.f2u(self.f_h)   # hover voltage
         if self.fmax < 1.1*self.f_h:
             raise Exception("Motors are too weak, change kf!")
+        
+    def stateConstraint(self, x):
+        """
+        x: vector of variables representing the states
+        """
+        return None
 
     def u2f(self, u):
         return self.kf[0] + self.kf[1]*u + self.kf[2]*u**2
@@ -85,16 +106,19 @@ class Quadrotor1():
         f = self.m * self.g / (4*cos(roll)*cos(pitch))
         return self.f2u(f)
     
-    def dx(self, t, x, u, w):
+    def getOutput(self, x, v=None):
+        if v is None:
+            v = np.zeros(self.Ny)
+        return self.C @ x + v
+    
+    def dx(self, x, u, w=None):
         """
         Parameters:
         -----------
-        t : float
-            Time (not used explicitly but required for ODE solvers)
         x : array_like
             State vector [X, Xd, Y, Yd, Z, Zd, phi, theta, psi, p, q, r, f1, f2, f3, f4]
         w: array_like
-            Process noise (disturbance): dx = Ax + Bu + w
+            Process noise (disturbance): dx = Ax + Bu + Gw
         
         Returns:
         --------
@@ -142,6 +166,8 @@ class Quadrotor1():
         dx[15] = -1/self.tc*f4 + 1/self.tc*(self.kf[2]*u[3]**2 + self.kf[1]*u[3] + self.kf[0])
 
         # Add process noise
+        if w is None:
+            w = np.zeros(self.Nx)
         for i in range(self.Nx):
             dx[i] += w[i]
         
@@ -149,7 +175,10 @@ class Quadrotor1():
 
     def linearize(self, xs, us):
         """
-        Linearize quadcopter dynamics around equilibrium point (xs, us)
+        Linearize quadcopter dynamics around equilibrium point (xs, us).
+        Linearized model:
+        dx = Ax + Bu + Gw
+        y = Cx + v
         
         Parameters:
         -----------
@@ -160,10 +189,10 @@ class Quadrotor1():
         
         Returns:
         --------
-        matA : numpy.ndarray
-            Linearized system matrix A
-        matB : numpy.ndarray
-            Linearized input matrix B
+        A : Linearized system matrix A
+        B : Linearized input matrix B
+        G : Process noise matrix G
+        C : Output matrix C
         """
         
         # Extract state variables
@@ -276,6 +305,6 @@ class Quadrotor1():
         matB[14, 2] = (self.kf[1] + 2*self.kf[2]*u3)/self.tc
         matB[15, 3] = (self.kf[1] + 2*self.kf[2]*u4)/self.tc
         
-        return matA, matB
+        return matA, matB, self.G, self.C
     
     
