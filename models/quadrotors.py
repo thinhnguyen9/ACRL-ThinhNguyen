@@ -1,8 +1,9 @@
 import numpy as np
 from math import sin, cos, tan, sqrt, atan2
 import matplotlib.pyplot as plt
+from .basic import DynamicalSystem
 
-class Quadrotor1():
+class Quadrotor1(DynamicalSystem):
 
     """
         X-config quadrotor

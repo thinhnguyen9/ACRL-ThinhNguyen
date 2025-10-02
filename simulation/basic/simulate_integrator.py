@@ -12,7 +12,7 @@ from datetime import datetime
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 from src.estimators import KF, MHE
-from models.chemical import Reactor1
+from models.basic import Nth_Integrator
 from src.simulator import Simulator
 
 def main(
@@ -35,15 +35,15 @@ def main(
         enable_plot=False
     ):
     
-    # ----------------------- Reactor -----------------------
-    reactor = Reactor1()
+    # ----------------------- Model -----------------------
+    integrator = Nth_Integrator(n=2)
 
     # ----------------------- Simulation -----------------------
     if Q is None:   Q = np.diag(w_stds**2)
     if R is None:   R = np.diag(v_stds**2)
     sim = Simulator(
         mode = 'reactor',
-        sys = reactor,
+        sys = integrator,
         w_means = w_means,
         w_stds = w_stds,
         v_means = v_means,
@@ -58,18 +58,18 @@ def main(
         # Initialize estimators - must be done every loop
         if 'KF' in enabled_estimators:
             SKF = KF(
-                model = reactor,
+                model = integrator,
                 ts = sim.get_time_step(),
                 Q = Q,
                 R = R,
                 P0 = P0,
                 type = "standard",
-                xs = np.zeros(reactor.Nx),
-                us = None
+                xs = np.array([0., 0.]),
+                us = 0.
             )
         if 'EKF' in enabled_estimators:
             EKF = KF(
-                model = reactor,
+                model = integrator,
                 ts = sim.get_time_step(),
                 Q = Q,
                 R = R,
@@ -78,7 +78,7 @@ def main(
             )
         if 'LMHE1' in enabled_estimators:
             LMHE_once = MHE(
-                model = reactor,
+                model = integrator,
                 ts = sim.get_time_step(),
                 Q = Q,
                 R = R,
@@ -88,12 +88,12 @@ def main(
                 mhe_type = "linearized_once",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
-                xs = np.array([0.3, 2.4]),
-                us = None
+                xs = np.array([0., 0.]),
+                us = 0.
             )
         if 'LMHE2' in enabled_estimators:
             LMHE_every = MHE(
-                model = reactor,
+                model = integrator,
                 ts = sim.get_time_step(),
                 Q = Q,
                 R = R,
@@ -103,12 +103,12 @@ def main(
                 mhe_type = "linearized_every",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
-                xs = np.array([0.3, 2.4]),
-                us = None
+                xs = np.array([0., 0.]),
+                us = 0.
             )
         if 'NMHE' in enabled_estimators:
             NMHE = MHE(
-                model = reactor,
+                model = integrator,
                 ts = sim.get_time_step(),
                 Q = Q,
                 R = R,
@@ -118,12 +118,13 @@ def main(
                 mhe_type = "nonlinear",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
-                xs = np.array([0.3, 2.4]),
-                us = None
+                xs = np.array([0., 0.]),
+                us = 0.
             )
 
         tvec, xvec, uvec, yvec = sim.simulate_free_response(
-                x0 = np.array([3., 1.]),
+                x0 = np.array([3., -1.]),
+                u = np.sin(2*np.arange(0.0, T+ts, ts)),
                 # zero_disturbance = True,
                 # zero_noise = True
         )
@@ -209,18 +210,17 @@ if __name__ == "__main__":
     main(
         enabled_estimators=['EKF', 'NMHE'],
         v_means=np.array([0.]),
-        v_stds=np.array([.1]),
+        v_stds=np.array([1e-1]),
         w_means=np.array([0., 0.]),
-        w_stds=np.array([1e-3, 1e-3]),
+        w_stds=np.array([1e-1, 2e-1]),
         X0=np.array([0.1, 4.5]),
-        # X0=np.array([.5, 4.]),
-        P0=np.eye(2) * (6**2),
-        # Q=np.diag([1e-4, 1e-2]),
-        # R=np.diag([1e-2]),
-        T=10.,
+        P0=np.eye(2),
+        # Q=np.diag([1e-3, 1e-3]),
+        # R=np.diag([1e-3]),
+        T=5.,
         ts=.1,
-        # loops=5,
-        # mhe_horizon  = 100,
+        # loops=1,
+        # mhe_horizon=20,
         mhe_update   = "smoothing",     # "filtering", "smoothing"
         prior_method = "ekf",           # "zero", "uniform", "ekf"
         # save_csv=True,

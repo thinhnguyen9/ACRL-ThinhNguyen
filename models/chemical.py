@@ -1,9 +1,9 @@
 import numpy as np
 from math import sin, cos, tan, sqrt, atan2
 import matplotlib.pyplot as plt
+from .basic import DynamicalSystem
 
-
-class Reactor1():
+class Reactor1(DynamicalSystem):
 
     """
         Haseltine and Rawlings: “A Critical Evaluation of EKF and MHE”, 2003

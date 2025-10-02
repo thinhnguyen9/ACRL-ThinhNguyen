@@ -15,7 +15,25 @@ from src.estimators import KF, MHE
 from models.quadrotors import Quadrotor1
 from src.simulator import Simulator
 
-def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=False, enable_plot=False):
+def main(
+        enabled_estimators,
+        v_means,    # Measurement noise (gaussian)
+        v_stds,     # max error ~ 3 std.dev.
+        w_means,    # Process noise (gaussian)
+        w_stds,     # max error ~ 3 std.dev.
+        X0,         # initial estmate (unused in this simulation)
+        P0,         # initial covariance
+        Q=None,     # weighting matrix, override if needed
+        R=None,     # weighting matrix, override if needed
+        T=1.0,
+        ts=0.01,
+        loops=1,
+        mhe_horizon=10,
+        mhe_update="filtering",
+        prior_method="ekf",
+        save_csv=False,
+        enable_plot=False
+    ):
     
     # ----------------------- Quadrotor -----------------------
     drone = Quadrotor1(
@@ -50,21 +68,8 @@ def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=F
     uhover_est = np.array([drone_est.u_h]*drone_est.Nu)
 
     # ----------------------- Simulation -----------------------
-    # Measurement noise (gaussian): max error ~ 3 std.dev.
-    # v_means = np.array([.1, 0., .1, 0., .1, 0., -.1, -.1, -.1])
-    v_means = np.zeros(drone.Ny)
-    v_stds = np.array([.02, .5, .02, .5, .02, .5, .03, .03, .03])/3
-
-    # Process noise (gaussian): max error ~ 3 std.dev.
-    # w_means = np.array([.1, -.5, .1, -.5, .1, -.5,
-    #                     0., 0., 0., 0., 0., 0.,
-    #                     0., 0., 0., 0.])
-    w_means = np.zeros(drone.Nx)
-    w_stds = np.array([ .1, 2., .1, 2., .1, 2.,
-                        .1, .1, .1, .5, .5, .5,
-                        10., 10., 10., 10. ])/3
-    Q = np.diag(w_stds**2)
-    R = np.diag(v_stds**2)
+    if Q is None:   Q = np.diag(w_stds**2)
+    if R is None:   R = np.diag(v_stds**2)
 
     sim = Simulator(
         mode = 'quadrotor',
@@ -74,11 +79,11 @@ def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=F
         v_means = v_means,
         v_stds = v_stds,
         T = T,
-        ts = ts
+        ts = ts,
+        # noise_distribution = 'uniform'
     )
 
     # ----------------------- Run estimation -----------------------
-    P0 = np.eye(drone.Nx)
     for loop in range(loops):
         print("============ Simulation instance " + str(loop+1) + " of " + str(loops) + " ============")
         # Initialize estimators - must be done every loop
@@ -112,7 +117,8 @@ def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=F
                 X0 = xhover_est,
                 P0 = P0,
                 mhe_type = "linearized_once",
-                mhe_update = "filtering",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
                 xs = xhover_est,
                 us = uhover_est
             )
@@ -126,7 +132,8 @@ def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=F
                 X0 = xhover_est,
                 P0 = P0,
                 mhe_type = "linearized_every",
-                mhe_update = "filtering",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
                 xs = xhover_est,
                 us = uhover_est
             )
@@ -140,15 +147,17 @@ def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=F
                 X0 = xhover_est,
                 P0 = P0,
                 mhe_type = "nonlinear",
-                mhe_update = "filtering",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
                 xs = xhover_est,
                 us = uhover_est
             )
 
         tvec, xvec, uvec, yvec = sim.simulate_point_to_point_LQR(
-                # x0 = np.array([ -.2, .1, .3, -.1, -1., .1,
-                #                 .01, -.01, .02,
-                #                 -.1, .1, .05,
+                # x0 = copy.deepcopy(xhover_est),
+                # x0 = np.array([ 0., 0., 0., 0., -1., 0.,
+                #                 .35, -.35, 0.,
+                #                 0., 0., 0.,
                 #                 drone.f_h*.8, drone.f_h*.9, drone.f_h*1.2, drone.f_h*1.1 ]),
                 zero_disturbance = False,
                 zero_noise = False
@@ -308,23 +317,63 @@ def main(enabled_estimators, T=5.0, ts=0.01, loops=1, mhe_horizon=10, save_csv=F
             plt.title(title_prefix, fontsize=10)
 
         plt.figure(3)
-        plt.suptitle('Estimation error')
+        plt.suptitle('Estimation error (by state)')
         for idx in range(drone.Nx):
             plt.subplot(4, 4, idx+1)
             plot_error(idx)
+
+        if 'EKF' in enabled_estimators and 'LMHE2' in enabled_estimators:
+            plt.figure(4)
+            plt.suptitle('Estimation error')
+            err_ekf   = np.linalg.norm(xvec - xhat_ekf, axis=1)
+            err_lmhe2 = np.linalg.norm(xvec - xhat_lmhe2, axis=1)
+
+            plt.subplot(211)
+            plt.plot(tvec, err_ekf, 'r-', lw=1., label='EKF')
+            plt.plot(tvec, err_lmhe2, 'b-', lw=1., label='LMHE2')
+            plt.grid()
+            plt.ylabel(r'$\|x - \hat{x}\|$', fontsize=10)
+            plt.legend()
+
+            plt.subplot(212)
+            plt.plot(tvec, err_lmhe2-err_ekf, 'k--', lw=1., label='LMHE2-EKF')
+            plt.grid()
+            plt.xlabel('Time (s)')
+            plt.ylabel('LMHE2 - EKF')
 
         plt.show()
 
 
 if __name__ == "__main__":
+    """
+    Estimators to simulate: 'KF', 'EKF',
+                            'LMHE1' (linearized once),'LMHE2' (linearized every step),
+                            'NMHE' (using nonlinear dynamics)
+    """
     main(
         enabled_estimators=['EKF', 'LMHE2'],
-        T=2.5,
-        loops=5,
-        mhe_horizon=10,
+        v_means=np.zeros(9),
+        # v_means = np.array([.1, 0., .1, 0., .1, 0., -.1, -.1, -.1]),
+        v_stds=np.array([.02, .5, .02, .5, .02, .5, .03, .03, .03])/3,
+        w_means=np.zeros(16),
+        # w_means = np.array([.1, -.5, .1, -.5, .1, -.5,
+        #                     0., 0., 0., 0., 0., 0.,
+        #                     0., 0., 0., 0.]),
+        w_stds=np.array([.1, 2., .1, 2., .1, 2.,
+                         .1, .1, .1, .5, .5, .5,
+                         10., 10., 10., 10. ])/3,
+        X0=None,
+        P0=np.eye(16) * 1e0,
+        # Q=np.diag([ .1, 2., .1, 2., .1, 2.,
+        #             .1, .1, .1, .5, .5, .5,
+        #             10., 10., 10., 10. ])**.5,
+        # R=np.diag([.02, .5, .02, .5, .02, .5, .03, .03, .03])**.5,
+        T=1.,
+        # ts=0.001,
+        # loops=5,
+        # mhe_horizon  = 30,
+        mhe_update   = "filtering",     # "filtering", "smoothing"
+        prior_method = "ekf",           # "zero", "uniform", "ekf"
         # save_csv=True,
         enable_plot=True
     )
-            # Estimators to simulate: 'KF', 'EKF',
-            #                         'LMHE1' (linearized once),'LMHE2' (linearized every step),
-            #                         'NMHE' (using nonlinear dynamics)

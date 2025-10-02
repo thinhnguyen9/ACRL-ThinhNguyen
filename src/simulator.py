@@ -26,10 +26,13 @@ class Simulator():
             v_means,
             v_stds,
             T=5.0,
-            ts=0.01
+            ts=0.01,
+            noise_distribution="gaussian"
         ):
         if mode not in ['quadrotor', 'reactor']:
             raise ValueError("Invalid mode. Supported modes: 'quadrotor', 'reactor'.")
+        if noise_distribution not in ['gaussian', 'uniform']:
+            raise ValueError("Invalid noise distribution. Supported distributions: 'gaussian', 'uniform'.")
         self.mode   = mode
         self.sys    = sys
         self.T      = T
@@ -43,6 +46,7 @@ class Simulator():
         self.w_stds     = w_stds
         self.v_means    = v_means
         self.v_stds     = v_stds
+        self.noise_distribution = noise_distribution
 
         # Set equilibrium point for linearization
         if self.mode == 'quadrotor':
@@ -117,15 +121,18 @@ class Simulator():
         if zero_disturbance:
             wvec = np.zeros((self.N, self.Nx))
         else:
-            wvec = np.random.normal(loc=self.w_means, scale=self.w_stds, size=(self.N, self.Nx))
-            # wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3, size=(self.N, self.Nx))
+            if self.noise_distribution=="gaussian":  wvec = np.random.normal(loc=self.w_means, scale=self.w_stds, size=(self.N, self.Nx))
+            elif self.noise_distribution=="uniform": wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3, size=(self.N, self.Nx))
         if zero_noise:
             vvec = np.zeros((self.N, self.Ny))
         else:
-            vvec = np.random.normal(loc=self.v_means, scale=self.v_stds, size=(self.N, self.Ny))
-            # vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3, size=(self.N, self.Ny))
+            if self.noise_distribution=="gaussian":  vvec = np.random.normal(loc=self.v_means, scale=self.v_stds, size=(self.N, self.Ny))
+            elif self.noise_distribution=="uniform": vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3, size=(self.N, self.Ny))
 
         for i in range(self.N):
+            # if i % 126 == 0:
+            #     vvec[i] = vvec[i]*10.   # introduce outliers
+
             xvec[i,:] = x0
             yvec[i,:] = self.sys.getOutput(x0, vvec[i,:])
 
@@ -150,25 +157,28 @@ class Simulator():
         return self.tvec, xvec, uvec, yvec
     
 
-    def simulate_free_response(self, x0, zero_disturbance=False, zero_noise=False):
+    def simulate_free_response(self, x0, u=None, zero_disturbance=False, zero_noise=False):
         xvec = np.zeros((self.N, self.Nx))
         yvec = np.zeros((self.N, self.Ny))
-        uvec = np.zeros((self.N, self.Nu))
+        if u is None:
+            uvec = np.zeros((self.N, self.Nu))
+        else:
+            uvec = u.reshape((self.N, self.Nu))
         if zero_disturbance:
             wvec = np.zeros((self.N, self.Nx))
         else:
-            wvec = np.random.normal(loc=self.w_means, scale=self.w_stds, size=(self.N, self.Nx))
-            # wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3, size=(self.N, self.Nx))
+            if self.noise_distribution=="gaussian":  wvec = np.random.normal(loc=self.w_means, scale=self.w_stds, size=(self.N, self.Nx))
+            elif self.noise_distribution=="uniform": wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3, size=(self.N, self.Nx))
         if zero_noise:
             vvec = np.zeros((self.N, self.Ny))
         else:
-            vvec = np.random.normal(loc=self.v_means, scale=self.v_stds, size=(self.N, self.Ny))
-            # vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3, size=(self.N, self.Ny))
+            if self.noise_distribution=="gaussian":  vvec = np.random.normal(loc=self.v_means, scale=self.v_stds, size=(self.N, self.Ny))
+            elif self.noise_distribution=="uniform": vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3, size=(self.N, self.Ny))
 
         for i in range(self.N):
             xvec[i,:] = x0
             yvec[i,:] = self.sys.getOutput(x0, vvec[i,:])
-            dx = self.sys.dx(x0, None, wvec[i,:])
+            dx = self.sys.dx(x0, uvec[i,:], wvec[i,:])
             x0 += dx*self.ts
 
         self.xvec = xvec
