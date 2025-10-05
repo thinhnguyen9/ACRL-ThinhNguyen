@@ -11,7 +11,8 @@ import csv
 from datetime import datetime
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
-from src.estimators import KF, MHE
+from src.kf import KF
+from src.mhe import MHE
 from models.quadrotors import Quadrotor1
 from src.simulator import Simulator
 
@@ -31,6 +32,7 @@ def main(
         mhe_horizon=10,
         mhe_update="filtering",
         prior_method="ekf",
+        solver=None,
         save_csv=False,
         enable_plot=False
     ):
@@ -119,6 +121,7 @@ def main(
                 mhe_type = "linearized_once",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
+                solver = solver,
                 xs = xhover_est,
                 us = uhover_est
             )
@@ -134,6 +137,7 @@ def main(
                 mhe_type = "linearized_every",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
+                solver = solver,
                 xs = xhover_est,
                 us = uhover_est
             )
@@ -149,6 +153,7 @@ def main(
                 mhe_type = "nonlinear",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
+                solver = None,  # nonlinear MHE cannot use QP PCIP!!
                 xs = xhover_est,
                 us = uhover_est
             )
@@ -368,12 +373,13 @@ if __name__ == "__main__":
         #             .1, .1, .1, .5, .5, .5,
         #             10., 10., 10., 10. ])**.5,
         # R=np.diag([.02, .5, .02, .5, .02, .5, .03, .03, .03])**.5,
-        T=1.,
+        T=5.,
         # ts=0.001,
         # loops=5,
         # mhe_horizon  = 30,
-        mhe_update   = "filtering",     # "filtering", "smoothing"
+        mhe_update   = "filtering",     # "filtering", "smoothing", or "smoothing_naive"
         prior_method = "ekf",           # "zero", "uniform", "ekf"
+        solver       = "pcip",
         # save_csv=True,
         enable_plot=True
     )

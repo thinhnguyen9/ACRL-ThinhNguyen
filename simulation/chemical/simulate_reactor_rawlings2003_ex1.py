@@ -11,7 +11,8 @@ import csv
 from datetime import datetime
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
-from src.estimators import KF, MHE
+from src.kf import KF
+from src.mhe import MHE
 from models.chemical import Reactor1
 from src.simulator import Simulator
 
@@ -31,6 +32,7 @@ def main(
         mhe_horizon=10,
         mhe_update="filtering",
         prior_method="ekf",
+        solver=None,
         save_csv=False,
         enable_plot=False
     ):
@@ -88,6 +90,7 @@ def main(
                 mhe_type = "linearized_once",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
+                solver = solver,
                 xs = np.array([0.3, 2.4]),
                 us = None
             )
@@ -103,6 +106,7 @@ def main(
                 mhe_type = "linearized_every",
                 mhe_update = mhe_update,
                 prior_method = prior_method,
+                solver = solver,
                 xs = np.array([0.3, 2.4]),
                 us = None
             )
@@ -119,6 +123,7 @@ def main(
                 mhe_update = mhe_update,
                 prior_method = prior_method,
                 xs = np.array([0.3, 2.4]),
+                solver = None,  # nonlinear MHE cannot use QP PCIP!!
                 us = None
             )
 
@@ -207,7 +212,7 @@ if __name__ == "__main__":
                             'NMHE' (using nonlinear dynamics)
     """
     main(
-        enabled_estimators=['EKF', 'NMHE'],
+        enabled_estimators=['EKF', 'LMHE2', 'NMHE'],
         v_means=np.array([0.]),
         v_stds=np.array([.1]),
         w_means=np.array([0., 0.]),
@@ -223,6 +228,7 @@ if __name__ == "__main__":
         # mhe_horizon  = 100,
         mhe_update   = "smoothing",     # "filtering", "smoothing"
         prior_method = "ekf",           # "zero", "uniform", "ekf"
+        solver       = "pcip",
         # save_csv=True,
         enable_plot=True
     )
