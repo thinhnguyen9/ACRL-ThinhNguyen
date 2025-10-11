@@ -12,6 +12,7 @@
 #   (we follow their log-barrier + prediction-correction ODE, discretized).  # :contentReference[oaicite:1]{index=1}
 
 import numpy as np
+from scipy.linalg import cholesky, solve_triangular
 
 # -----------------------------------------------------
 # Helpers
@@ -226,6 +227,9 @@ class PCIPQP:
 
         # Solve Newton system
         delta = np.linalg.solve(hess_phi, -self.alpha*grad_phi - g_pred)
+        # L = cholesky(hess_phi, lower=True)  # Cholesky decomposition
+        # y = solve_triangular(L, -self.alpha*grad_phi - g_pred, lower=True)  # Solve Ly = b
+        # delta = solve_triangular(L.T, y)  # Solve L.T x = y
         # delta = np.linalg.inv(H) @ rhs    # slow, not accurate
         # delta = np.zeros_like(z0)
 

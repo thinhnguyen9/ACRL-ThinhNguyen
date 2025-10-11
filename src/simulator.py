@@ -65,24 +65,44 @@ class Simulator():
         return max(lower_bound, min(upper_bound, val))
 
 
-    def simulate_point_to_point_LQR(self, x0=None, xref=None, zero_disturbance=False, zero_noise=False):
+    def simulate_quadrotor_lqr_control(self, traj_mode="p2p", x0=None, xref=None, zero_disturbance=False, zero_noise=False):
+        """
+        traj_mode: "p2p" (point-to-point)
+                   "circle" (circular trajectory)
+        """
         # ----------------------- Initial & ref states -----------------------
-        if self.mode == 'quadrotor':
-            if x0 is None:
-                x0 = np.array([ 0., 0., 0., 0., -1., 0.,
-                                0., 0., 0.,
-                                0., 0., 0.,
-                                0., 0., 0., 0. ])
-                x0[12:16] = self.sys.f_h  # Set initial forces to hover
-            if xref is None:
-                xref = np.array([ .25, 0., .5, 0., -1., 0.,
-                                0., 0., 0.,
-                                0., 0., 0.,
-                                0., 0., 0., 0. ])
-                xref[12:16] = self.sys.f_h  # Set final forces to hover
+        if self.mode != 'quadrotor':
+            return
         else:
-            if x0 is None:      x0 = np.zeros(self.Nx)
-            if xref is None:    xref = np.ones(self.Nx) * .5
+            if traj_mode == "p2p":
+                if x0 is None:
+                    x0 = np.array([ 0., 0., 0., 0., -1., 0.,
+                                    0., 0., 0.,
+                                    0., 0., 0.,
+                                    self.sys.f_h, self.sys.f_h, self.sys.f_h, self.sys.f_h ])
+                if xref is None:
+                    xref = np.array([ .25, 0., .5, 0., -1., 0.,
+                                    0., 0., 0.,
+                                    0., 0., 0.,
+                                    self.sys.f_h, self.sys.f_h, self.sys.f_h, self.sys.f_h ])
+            
+            elif traj_mode == "circle":
+                radius = 0.5    # m
+                omega = 1.75    # rad/s
+                vz = -.1        # m/s
+                z0 = -1.
+                x0 = np.array([ radius, 0., 0., 0., z0, 0.,
+                                0., 0., 0.,
+                                0., 0., 0.,
+                                self.sys.f_h, self.sys.f_h, self.sys.f_h, self.sys.f_h ])
+                xref = np.array([ 0., 0., 0., 0., z0, 0.,
+                                0., 0., 0.,
+                                0., 0., 0.,
+                                self.sys.f_h, self.sys.f_h, self.sys.f_h, self.sys.f_h ])
+        
+        # else:
+        #     if x0 is None:      x0 = np.zeros(self.Nx)
+        #     if xref is None:    xref = np.ones(self.Nx) * .5
 
         # ----------------------- Controller -----------------------
         StateFeedback = LQR(
@@ -132,6 +152,14 @@ class Simulator():
         for i in range(self.N):
             # if i % 126 == 0:
             #     vvec[i] = vvec[i]*10.   # introduce outliers
+            
+            if traj_mode=="circle":
+                xref[0] = radius * cos(omega*self.tvec[i])
+                xref[2] = radius * sin(omega*self.tvec[i])
+                xref[4] = z0 + vz * self.tvec[i]
+                xref[1] = -radius * omega * sin(omega*self.tvec[i])
+                xref[3] = radius * omega * cos(omega*self.tvec[i])
+                xref[5] = vz
 
             xvec[i,:] = x0
             yvec[i,:] = self.sys.getOutput(x0, vvec[i,:])

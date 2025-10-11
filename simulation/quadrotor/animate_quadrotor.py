@@ -2,6 +2,7 @@ import numpy as np
 from math import sin, cos, sqrt
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+import os
 
 # ----------------------- Params -----------------------
 ts = .01
@@ -10,7 +11,8 @@ l = .2  # Length of the quadrotor arms
 # -------------------------------------------------------
 
 # Load the simulation data from the .npy file
-with open('quadrotor-simulator/sim_data.npy', 'rb') as f:
+file_path = os.path.join(os.path.dirname(__file__), 'sim_data.npy')
+with open(file_path, 'rb') as f:
     tvec = np.load(f)
     xvec = np.load(f)
     xhat = np.load(f)

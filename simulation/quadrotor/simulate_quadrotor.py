@@ -158,7 +158,8 @@ def main(
                 us = uhover_est
             )
 
-        tvec, xvec, uvec, yvec = sim.simulate_point_to_point_LQR(
+        tvec, xvec, uvec, yvec = sim.simulate_quadrotor_lqr_control(
+                traj_mode = "circle",  # "p2p" / "circle"
                 # x0 = copy.deepcopy(xhover_est),
                 # x0 = np.array([ 0., 0., 0., 0., -1., 0.,
                 #                 .35, -.35, 0.,
@@ -208,13 +209,14 @@ def main(
                 writer = csv.writer(csvfile)
                 writer.writerows(data)
     print("======================================================")
-    # with open('simulation/quadrotor/sim_data.npy', 'wb') as f:
-    #     np.save(f, tvec)
-    #     np.save(f, xvec)
-    #     np.save(f, xhat)
-    #     np.save(f, yvec)
-    #     np.save(f, uvec)
-    # print("Simulation data saved to 'sim_data.npy'")
+    xhat = xhat_ekf if 'EKF' in enabled_estimators else np.zeros_like(xvec)
+    with open('simulation/quadrotor/sim_data.npy', 'wb') as f:
+        np.save(f, tvec)
+        np.save(f, xvec)
+        np.save(f, xhat)
+        np.save(f, yvec)
+        np.save(f, uvec)
+    print("Simulation data saved to 'sim_data.npy'")
 
     # ----------------------- Plot results -----------------------
     if enable_plot:
@@ -369,17 +371,17 @@ if __name__ == "__main__":
                          10., 10., 10., 10. ])/3,
         X0=None,
         P0=np.eye(16) * 1e0,
-        # Q=np.diag([ .1, 2., .1, 2., .1, 2.,
-        #             .1, .1, .1, .5, .5, .5,
-        #             10., 10., 10., 10. ])**.5,
-        # R=np.diag([.02, .5, .02, .5, .02, .5, .03, .03, .03])**.5,
-        T=5.,
+        Q=np.diag([ .1, 2., .1, 2., .1, 2.,
+                    .1, .1, .1, .5, .5, .5,
+                    10., 10., 10., 10. ])**.5,
+        R=np.diag([.02, .5, .02, .5, .02, .5, .03, .03, .03])**.5,
+        T=20.,
         # ts=0.001,
         # loops=5,
         # mhe_horizon  = 30,
-        mhe_update   = "filtering",     # "filtering", "smoothing", or "smoothing_naive"
+        mhe_update   = "smoothing_naive",     # "filtering", "smoothing", or "smoothing_naive"
         prior_method = "ekf",           # "zero", "uniform", "ekf"
-        solver       = "pcip",
+        # solver       = "pcip",
         # save_csv=True,
         enable_plot=True
     )
