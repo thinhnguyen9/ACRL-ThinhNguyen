@@ -3,7 +3,9 @@ from math import sin, cos
 import cvxpy as cp
 from scipy.optimize import minimize, LinearConstraint
 import copy
-from src.pcip import PCIPQP, build_mhe_qp, build_mhe_qp_with_lagrangian
+from src.pcip import PCIPQP
+from src.l1ao import L1AOQP
+from src.utils import build_mhe_qp_with_dyn_constraints, build_mhe_qp_with_dyn_constraints_lagrangian, build_mhe_qp
 
 
 class MHE():
@@ -49,8 +51,8 @@ class MHE():
             raise ValueError("mhe_update must be 'filtering', 'smoothing', or 'smoothing_naive'.")
         if prior_method not in ["zero", "ekf", "uniform"]:
             raise ValueError("prior_method must be 'zero', 'ekf', or 'uniform'.")
-        if solver not in [None, "pcip"]:
-            raise ValueError("solver must be None (default) or 'pcip'.")
+        if solver not in [None, "pcip", "pcip_l1ao"]:
+            raise ValueError("solver must be None (default), 'pcip', or 'pcip_l1ao'.")
         self.mhe_type = mhe_type
         self.mhe_update = mhe_update
         self.prior_method = prior_method
@@ -68,8 +70,10 @@ class MHE():
         self.Pvec1[0] = P0
         self.P0 = P0
 
-        if self.solver=="pcip":
-            self.pcip = PCIPQP(alpha=1./self.ts, c0=10.0, gamma_c=0.1, ts=self.ts)
+        if self.solver in ["pcip", "pcip_l1ao"]:
+            self.pcip = PCIPQP(alpha=1./self.ts, ts=self.ts)
+        if self.solver == "pcip_l1ao":
+            self.l1ao = L1AOQP(ts=self.ts)
 
     def updateModel(self, A, B, G, C):
         # Discretize
@@ -212,8 +216,8 @@ class MHE():
                 P0_inv = np.zeros((self.Nx, self.Nx))
             else:
                 P0_inv = np.linalg.inv(P0)
-            H, f, A_eq, b_eq = build_mhe_qp(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
-                                            X0, P0_inv, u, y)
+            H, f = build_mhe_qp(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
+                                X0, P0_inv, u, y)
             
             if self.solver is None:
                 '''
@@ -254,17 +258,24 @@ class MHE():
                     self.updateModel(A, B, G, C)
                 cost += .5*cp.quad_form(y[-1] - self.C@x[-1], self.R_inv)
                 '''
-
                 # ========================================================= #
                 # quadratic programming: V = 1/2 z'Hz + f'z
                 # constraint: A_eq z = b_eq
                 # ========================================================= #
+                """
+                H, f, A_eq, b_eq = build_mhe_qp_with_dyn_constraints(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
+                                                                     X0, P0_inv, u, y)
 
                 # Variable z = [x0...xN, w0...w(N-1)]
                 z = cp.Variable(((2*N+1)*self.Nx,))
                 constraints = []
                 cost = 0.5 * cp.quad_form(z, cp.psd_wrap(H)) + f @ z
                 if N>0: constraints.append(A_eq @ z == b_eq)
+                """
+                # Variable z = [x0, w0...w(N-1)]
+                z = cp.Variable(((N+1)*self.Nx,))
+                constraints = []
+                cost = 0.5 * cp.quad_form(z, cp.psd_wrap(H)) + f @ z
                 
                 # ========================================================= #
 
@@ -278,21 +289,18 @@ class MHE():
                     prob.solve(solver=cp.ECOS, feastol=1e-03, reltol=1e-3, abstol=1e-3, verbose=True)
 
                 # Result
-                if self.mhe_type == "linearized_once":
-                    # xvec = x.value + self.xs   # x(T-N)...x(T)
-                    xvec = z.value[0:(N+1)*self.Nx].reshape((N+1, self.Nx)) + self.xs
-                elif self.mhe_type == "linearized_every":
-                    # xvec = x.value + xnom      # x(T-N)...x(T)
-                    xvec = z.value[0:(N+1)*self.Nx].reshape((N+1, self.Nx)) + xnom
-            
+                # xvec = z.value[0:(N+1)*self.Nx].reshape((N+1, self.Nx))
+                z = z.value
             
             # ========================================================= #
             # ========================================================= #
             elif self.solver == "pcip": # only dynamics constraints!!
-
+                """
                 # Lagrange multiplier v, length: N*Nx
                 # z = [x(0),..., x(N), w(0),..., w(N-1), v], length: (3N+1)*Nx
-                H, f = build_mhe_qp_with_lagrangian(H, f, A_eq, b_eq)
+                H, f, A_eq, b_eq = build_mhe_qp_with_dyn_constraints(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
+                                                                     X0, P0_inv, u, y)
+                H, f = build_mhe_qp_with_dyn_constraints_lagrangian(H, f, A_eq, b_eq)
                 
                 # Initialize z0
                 if not hasattr(self, 'pcip_z0'):    # T=0: initialize z=0
@@ -309,9 +317,63 @@ class MHE():
                     z0 = self.pcip_z0
 
                 # solve QP with PCIP
-                z_hat = self.pcip.solve(z0, H, f)
+                self.pcip.set_QP(H, f)
+                _, z_hat = self.pcip.dynamics(z0, H, f)
                 self.pcip_z0 = z_hat
                 xvec = z_hat[:(N+1)*self.Nx].reshape((N+1, self.Nx)) + xnom
+                """
+                # z = [x(0), w(0), ..., w(N-1)]
+                # Initialize z0
+                if not hasattr(self, 'pcip_z0'):    # T=0: initialize z=0
+                    z0 = np.zeros((self.Nx,))
+                elif self.pcip_z0.shape[0] < (N+1)*self.Nx: # horizon still growing
+                    z0 = np.hstack((self.pcip_z0, self.pcip_z0[-self.Nx : ]))
+                else:   # full horizon reached - size of z fixed
+                    z0 = self.pcip_z0
+
+                # solve QP with PCIP
+                self.pcip.set_QP(H, f)
+                _, z = self.pcip.dynamics(z0)
+                self.pcip_z0 = z
+                
+            elif self.solver == "pcip_l1ao":
+                # z = [x(0), w(0), ..., w(N-1)]
+                # Initialize z0
+                if not hasattr(self, 'pcip_z0'):    # T=0: initialize z=0
+                    z0 = np.zeros((self.Nx,))
+                    za_dot0 = np.zeros((self.Nx,))
+                    grad_phi_hat0 = np.zeros((self.Nx,))
+                elif self.pcip_z0.shape[0] < (N+1)*self.Nx: # horizon still growing
+                    z0 = np.hstack((self.pcip_z0, self.pcip_z0[-self.Nx : ]))
+                    za_dot0 = np.hstack((self.l1ao_za_dot0, self.l1ao_za_dot0[-self.Nx : ]))
+                    grad_phi_hat0 = np.hstack((self.l1ao_grad_phi_hat0, self.l1ao_grad_phi_hat0[-self.Nx : ]))
+                else:   # full horizon reached - size of z fixed
+                    z0 = self.pcip_z0
+                    za_dot0 = self.l1ao_za_dot0
+                    grad_phi_hat0 = self.l1ao_grad_phi_hat0
+
+                # solve QP with PCIP
+                self.pcip.set_QP(H, f)
+                self.l1ao.set_QP(H, f)
+                zb_dot, _ = self.pcip.dynamics(z0)
+                za_dot, grad_phi_hat, z = self.l1ao.dynamics(z0, za_dot0, grad_phi_hat0, zb_dot)
+
+                # Save for next time step
+                self.pcip_z0 = z
+                self.l1ao_za_dot0 = za_dot
+                self.l1ao_grad_phi_hat0 = grad_phi_hat
+            
+            # ========================================================= #
+            # Result for linearized MHE
+            # ========================================================= #
+            xvec = self.construct_X_from_X0(z[:self.Nx], A_seq, B_seq, G_seq,
+                                            z[self.Nx:].reshape((N,self.Nx)), u)
+            if self.mhe_type == "linearized_once":
+                # xvec = x.value + self.xs   # x(T-N)...x(T)
+                xvec = xvec + self.xs
+            elif self.mhe_type == "linearized_every":
+                # xvec = x.value + xnom      # x(T-N)...x(T)
+                xvec = xvec + xnom
 
         # %% ========================================================================================================= #
         #                                   OPTIMIZATION - NONLINEAR MHE (scipy.optimize)
@@ -413,3 +475,10 @@ class MHE():
         # return self.xvec
         return self.xvec[-1]      # x(T)
     
+    def construct_X_from_X0(self, x0, A_seq, B_seq, G_seq, w_seq, u_seq):
+        N = len(A_seq)
+        xvec = np.zeros((N+1, self.Nx))
+        xvec[0] = x0
+        for k in range(N):
+            xvec[k+1] = A_seq[k] @ xvec[k] + B_seq[k] @ u_seq[k] + G_seq[k] @ w_seq[k]
+        return xvec
