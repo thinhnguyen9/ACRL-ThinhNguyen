@@ -71,9 +71,18 @@ class MHE():
         self.P0 = P0
 
         if self.solver in ["pcip", "pcip_l1ao"]:
-            self.pcip = PCIPQP(alpha=1./self.ts, ts=self.ts)
+            self.pcip = PCIPQP(
+                alpha=.1/self.ts,   # correction gain
+                ts=self.ts,
+                estimate_grad_zt=True   # estimate grad_zt_phi by finite differences
+            )
         if self.solver == "pcip_l1ao":
-            self.l1ao = L1AOQP(ts=self.ts)
+            self.l1ao = L1AOQP(
+                ts=self.ts,
+                a=-1.,         # diagonal Hurwitz As matrix
+                lpf_omega=30.,  # low-pass filter bandwidth
+                estimate_grad_zt=True   # estimate grad_zt_phi by finite differences
+            )
 
     def updateModel(self, A, B, G, C):
         # Discretize
@@ -82,13 +91,15 @@ class MHE():
         self.G = G*self.ts
         self.C = C
 
-    def doEstimation(self, yvec, uvec):
+    def doEstimation(self, yvec, uvec, Qinv_seq, Rinv_seq):
         """
         Run MHE to estimate state trajectory over the horizon.
         
         Args:
             yvec: sequence of outputs y(0)...y(T)
             uvec: sequence of inputs u(0)...u(T-1)
+            Qinv_seq: Q(0)^{-1}...Q(T)^{-1}
+            Rinv_seq: R(0)^{-1}...R(T)^{-1}
         Returns:
             Estimated current state x(T)
         """
@@ -122,6 +133,8 @@ class MHE():
             elif self.prior_method == "ekf":        P0 = self.Pvec[0]   # P(T-N|T-N-1)
             yseq_raw = yvec[-self.N-1 :]   # y(T-N)...y(T)
             useq_raw = uvec[-self.N :]     # u(T-N)...u(T-1)
+            Qinv_seq = Qinv_seq[-self.N-1 :] # (T-N)...(T)
+            Rinv_seq = Rinv_seq[-self.N-1 :] # (T-N)...(T)
 
         # %% ========================================================================================================= #
         #           TODO: Backward interation to find P(T-1|T-1)...P(T-N|T-1) for smoothing scheme
@@ -216,7 +229,7 @@ class MHE():
                 P0_inv = np.zeros((self.Nx, self.Nx))
             else:
                 P0_inv = np.linalg.inv(P0)
-            H, f = build_mhe_qp(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
+            H, f = build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq[:-1], Rinv_seq,
                                 X0, P0_inv, u, y)
             
             if self.solver is None:
@@ -456,14 +469,16 @@ class MHE():
             if self.mhe_type in ["linearized_every", "nonlinear"]:  # Linearize around xhat(T|T)
                 A, B, G, C = self.model.linearize(self.xvec[-1], useq_raw[-1] if N > 0 else self.us)    # TODO: do we need correct u here?
                 self.updateModel(A, B, G, C)
-            L = P0 @ self.C.T @ np.linalg.inv(self.R + self.C @ P0 @ self.C.T)
+            R_k = np.linalg.inv(Rinv_seq[-1])
+            Q_k = np.linalg.inv(Qinv_seq[-1])
+            L = P0 @ self.C.T @ np.linalg.inv(R_k + self.C @ P0 @ self.C.T)
             P = P0 - L @ self.C @ P0    # P(T|T)
             self.Pvec1 = np.concatenate((self.Pvec1, P.reshape((1, self.Nx, self.Nx))), axis=0)
             if np.size(self.Pvec1, 0) > self.N+1:
                 self.Pvec1 = self.Pvec1[-self.N-1:]
 
             # Calculate P(T+1|T) from P(T|T)
-            P = self.G @ self.Q @ self.G.T + self.A @ P @ self.A.T  # P(T+1|T)
+            P = self.G @ Q_k @ self.G.T + self.A @ P @ self.A.T  # P(T+1|T)
             self.Pvec = np.concatenate((self.Pvec, P.reshape((1, self.Nx, self.Nx))), axis=0)
             if np.size(self.Pvec, 0) > self.N+1:
                 self.Pvec = self.Pvec[-self.N-1:]

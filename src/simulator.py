@@ -27,7 +27,11 @@ class Simulator():
             v_stds,
             T=5.0,
             ts=0.01,
-            noise_distribution="gaussian"
+            noise_distribution="gaussian",
+            time_varying_measurement_noise=False,
+            use_QR_guess=False,
+            Q_guess=None,
+            R_guess=None
         ):
         if mode not in ['quadrotor', 'reactor']:
             raise ValueError("Invalid mode. Supported modes: 'quadrotor', 'reactor'.")
@@ -47,6 +51,8 @@ class Simulator():
         self.v_means    = v_means
         self.v_stds     = v_stds
         self.noise_distribution = noise_distribution
+        self.time_varying_measurement_noise = time_varying_measurement_noise
+        self.use_QR_guess   = use_QR_guess
 
         # Set equilibrium point for linearization
         if self.mode == 'quadrotor':
@@ -58,6 +64,42 @@ class Simulator():
         else:
             self.x_eq = np.zeros(self.Nx)
             self.u_eq = np.zeros(self.Nu)
+        
+        # Time-varying noise covariance
+        self.w_stds_fixed = self.w_stds.copy()
+        self.v_stds_fixed = self.v_stds.copy()
+        if self.time_varying_measurement_noise:
+            # w_omega = np.pi / 2.
+            v_omega = 15.
+            epsilon = 1e-3  # prevent infinite Q^{-1}, R^{-1}
+            # w_scale = np.sin(w_omega*self.tvec.reshape(self.N,1) + np.pi/4)**2 + epsilon
+            v_scale = np.sin(v_omega*self.tvec.reshape(self.N,1))**2 + epsilon
+        else:
+            # w_scale = np.ones((self.N, 1))
+            v_scale = np.ones((self.N, 1))
+        w_scale = np.ones((self.N, 1))
+        self.w_stds = np.kron(w_scale, self.w_stds)
+        self.v_stds = np.kron(v_scale, self.v_stds)
+
+        # For estimator ONLY
+        if self.use_QR_guess:   # use FIXED guesses of Q, R matrices
+            if Q_guess is None or R_guess is None:
+                raise ValueError("Q_guess and R_guess must be provided when use_QR_guess=True.")
+            temp = np.ones((self.N, 1, 1))
+            self.Q     = np.kron(temp, Q_guess)
+            self.R     = np.kron(temp, R_guess)
+            self.Q_inv = np.kron(temp, np.linalg.inv(Q_guess))
+            self.R_inv = np.kron(temp, np.linalg.inv(R_guess))
+        else:   # use true values of Q (fixed) and R (time-varying)
+            self.Q     = np.zeros((self.N, self.Nx, self.Nx))
+            self.R     = np.zeros((self.N, self.Ny, self.Ny))
+            self.Q_inv = np.zeros((self.N, self.Nx, self.Nx))
+            self.R_inv = np.zeros((self.N, self.Ny, self.Ny))
+            for k in range(self.N):
+                self.Q[k]     = np.diag(self.w_stds[k]**2)
+                self.R[k]     = np.diag(self.v_stds[k]**2)
+                self.Q_inv[k] = np.diag(1./(self.w_stds[k]**2))
+                self.R_inv[k] = np.diag(1./(self.v_stds[k]**2))
 
 
     @staticmethod
@@ -138,16 +180,29 @@ class Simulator():
         xvec = np.zeros((self.N, self.Nx))
         yvec = np.zeros((self.N, self.Ny))
         uvec = np.zeros((self.N, self.Nu))
+
+        # Process noise (disturbance) - sinusoidal, low-frequency
         if zero_disturbance:
             wvec = np.zeros((self.N, self.Nx))
         else:
-            if self.noise_distribution=="gaussian":  wvec = np.random.normal(loc=self.w_means, scale=self.w_stds, size=(self.N, self.Nx))
-            elif self.noise_distribution=="uniform": wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3, size=(self.N, self.Nx))
+            # if self.noise_distribution=="gaussian":  wvec = np.random.normal(loc=self.w_means, scale=self.w_stds)   # size=(self.N, self.Nx)
+            # elif self.noise_distribution=="uniform": wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3)   # size=(self.N, self.Nx)
+            w_omega = np.array([ 0., np.pi, 0., 1.7*np.pi, 0., 2.4*np.pi,     # external forces acting on Xdd, Ydd, Zdd
+                                 0., 0., 0.,
+                                 1.5*np.pi, .9*np.pi, .4*np.pi,  # external moments acting on pd, qd, rd
+                                 0., 0., 0., 0. ])
+            w_phase = np.array([ 0., np.pi/4, 0., np.pi/3, 0., np.pi/5,
+                                 0., 0., 0.,
+                                 0., np.pi/8, np.pi/7,
+                                 0., 0., 0., 0. ])
+            wvec = self.w_means + self.w_stds_fixed*np.sin(w_omega*self.tvec.reshape(self.N,1) + w_phase)
+        
+        # Measurement noise - Gaussian/uniform, high-frequency
         if zero_noise:
             vvec = np.zeros((self.N, self.Ny))
         else:
-            if self.noise_distribution=="gaussian":  vvec = np.random.normal(loc=self.v_means, scale=self.v_stds, size=(self.N, self.Ny))
-            elif self.noise_distribution=="uniform": vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3, size=(self.N, self.Ny))
+            if self.noise_distribution=="gaussian":  vvec = np.random.normal(loc=self.v_means, scale=self.v_stds)   # size=(self.N, self.Ny)
+            elif self.noise_distribution=="uniform": vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3)   # size=(self.N, self.Ny)
 
         for i in range(self.N):
             # if i % 126 == 0:
@@ -226,6 +281,10 @@ class Simulator():
         for i in range(self.N):
             # -------------- Kalman filter --------------
             if estimator_class == 'KF':
+                estimator.update_covariance(
+                    Q = self.Q[i],
+                    R = self.R[i]
+                )
                 x0hat = estimator.correction(x0hat, self.yvec[i])
                 xhat[i] = x0hat
                 x0hat = estimator.prediction(x0hat, self.uvec[i])
@@ -234,7 +293,9 @@ class Simulator():
             elif estimator_class == 'MHE':
                 x0hat = estimator.doEstimation(
                     yvec = self.yvec[: i+1],
-                    uvec = self.uvec[: i]
+                    uvec = self.uvec[: i],
+                    Qinv_seq = self.Q_inv[: i+1],
+                    Rinv_seq = self.R_inv[: i+1]
                 )
                 xhat[i] = x0hat
                 # estimator.updateCovariance(xhat[i], self.uvec[i])

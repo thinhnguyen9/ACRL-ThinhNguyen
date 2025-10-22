@@ -75,7 +75,7 @@ def build_mhe_qp_with_dyn_constraints_lagrangian(H, f, A_eq, b_eq):
 
     return H, f
 
-def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Q_inv, R_inv, x_prior, P_prior_inv, u_seq, y_seq):
+def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq, Rinv_seq, x_prior, P_prior_inv, u_seq, y_seq):
     """
     Linear QP with dynamics incorporated into the objective (no constraints).
     Optimization variable: z = [x(0), w(0), ..., w(N-1)]
@@ -86,6 +86,8 @@ def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Q_inv, R_inv, x_prior, P_prior_inv,
         B_seq = [B(0), ..., B(N-1)]
         G_seq = [G(0), ..., G(N-1)]
         C_seq = [C(0), ..., C(N)]
+        Qinv_seq = [Q(0)^{-1}, ..., Q(N-1)^{-1}]
+        Rinv_seq = [R(0)^{-1}, ..., R(N)^{-1}]
         u_seq = [u(0), ..., u(N-1)]
         y_seq = [y(0), ..., y(N)]
     """
@@ -106,8 +108,8 @@ def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Q_inv, R_inv, x_prior, P_prior_inv,
     else:
         matb = np.zeros((nx, ))
     matC = block_diag(*C_seq)
-    matR = block_diag(*[R_inv]*(N+1))
-    matQ = block_diag(np.zeros((nx,nx)), *[Q_inv]*N)
+    matR = block_diag(*Rinv_seq)
+    matQ = block_diag(np.zeros((nx,nx)), *Qinv_seq)
 
     # QP matrices
     AT_CT_R = matA.T @ matC.T @ matR

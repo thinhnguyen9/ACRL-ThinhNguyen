@@ -32,7 +32,8 @@ def main(
         mhe_horizon=10,
         mhe_update="filtering",
         prior_method="ekf",
-        solver=None,
+        time_varying_measurement_noise=False,
+        bad_model_knowledge=False,
         save_csv=False,
         enable_plot=False
     ):
@@ -51,27 +52,44 @@ def main(
         Kdy = 1.,
         Kdz = 1.
     )
-    drone_est = copy.deepcopy(drone)
-    # drone_est = Quadrotor1(     # used for estimation
-    #     l   = .2,
-    #     m   = .8 * 1.25,
-    #     Jx  = .05 * 1.25,
-    #     Jy  = .05 * 1.25,
-    #     Jz  = .07 * 1.25,
-    #     kf  = [0.0, 1.6, 4.0],
-    #     Kdt = [1.99049588e-04, 3.50416237e-02, -1.40556979e-03, 2.61568995e-04, -1.86983501e-05],
-    #     tc  = .1,
-    #     Kdx = 1.,
-    #     Kdy = 1.,
-    #     Kdz = 1.
-    # )
+    if bad_model_knowledge:
+        drone_est = Quadrotor1(     # used for estimation
+            l   = .2,
+            m   = .8 * 1.25,
+            Jx  = .05 * 1.25,
+            Jy  = .05 * 1.25,
+            Jz  = .07 * 1.25,
+            kf  = [0.0, 1.6, 4.0],
+            Kdt = [1.99049588e-04, 3.50416237e-02, -1.40556979e-03, 2.61568995e-04, -1.86983501e-05],
+            tc  = .1,
+            Kdx = 1.,
+            Kdy = 1.,
+            Kdz = 1.
+        )
+    else:
+        drone_est = copy.deepcopy(drone)
+    
     xhover_est = np.zeros(drone_est.Nx)
     xhover_est[12:16] = drone_est.f_h
     uhover_est = np.array([drone_est.u_h]*drone_est.Nu)
 
     # ----------------------- Simulation -----------------------
-    if Q is None:   Q = np.diag(w_stds**2)
-    if R is None:   R = np.diag(v_stds**2)
+    if Q is not None and R is not None:
+        use_QR_guess = True
+    else:
+        use_QR_guess = False
+        if Q is None:   Q = np.diag(w_stds**2)
+        if R is None:   R = np.diag(v_stds**2)
+    print("=================== Simulation settings ===================")
+    print(f"Simulation time    : {T:.1f} s")
+    print(f"Sampling period    : {ts/1e-3:.1f} ms")
+    print(f"Loops              : {loops:.0f}")
+    print(f"Time-varying noise : " + str(time_varying_measurement_noise))
+    print(f"Use Q,R guesses    : " + str(use_QR_guess))
+    print("======================= MHE settings ======================")
+    print(f"Horizon            : {mhe_horizon:.0f}")
+    print(f"MHE scheme         : " + mhe_update)
+    print(f"Prior weighting    : " + prior_method)
 
     sim = Simulator(
         mode = 'quadrotor',
@@ -82,7 +100,11 @@ def main(
         v_stds = v_stds,
         T = T,
         ts = ts,
-        # noise_distribution = 'uniform'
+        # noise_distribution = 'uniform',
+        time_varying_measurement_noise = time_varying_measurement_noise,
+        use_QR_guess = use_QR_guess,
+        Q_guess = Q,
+        R_guess = R
     )
 
     # ----------------------- Run estimation -----------------------
@@ -185,26 +207,27 @@ def main(
                 zero_noise = False
         )
         N = len(tvec)
+        t0 = 100    # wait till convergence to start calculating RMSE
         if 'KF' in enabled_estimators:
             xhat_kf, kf_time = sim.run_estimation(SKF, xhover_est)
-            rmse_kf = np.sqrt(np.mean((xvec - xhat_kf)**2))
+            rmse_kf = np.sqrt(np.mean((xvec[t0:] - xhat_kf[t0:])**2))
         if 'EKF' in enabled_estimators:
             xhat_ekf, ekf_time = sim.run_estimation(EKF, xhover_est)
-            rmse_ekf = np.sqrt(np.mean((xvec - xhat_ekf)**2))
+            rmse_ekf = np.sqrt(np.mean((xvec[t0:] - xhat_ekf[t0:])**2))
         if 'LMHE1' in enabled_estimators:
             xhat_lmhe1, lmhe1_time = sim.run_estimation(LMHE_cvxpy, xhover_est)
-            rmse_lmhe1 = np.sqrt(np.mean((xvec - xhat_lmhe1)**2))
+            rmse_lmhe1 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe1[t0:])**2))
         if 'LMHE2' in enabled_estimators:
             xhat_lmhe2, lmhe2_time = sim.run_estimation(LMHE_pcip, xhover_est)
-            rmse_lmhe2 = np.sqrt(np.mean((xvec - xhat_lmhe2)**2))
+            rmse_lmhe2 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe2[t0:])**2))
         if 'LMHE3' in enabled_estimators:
             xhat_lmhe3, lmhe3_time = sim.run_estimation(LMHE_pcip_l1ao, xhover_est)
-            rmse_lmhe3 = np.sqrt(np.mean((xvec - xhat_lmhe3)**2))
+            rmse_lmhe3 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe3[t0:])**2))
         if 'NMHE' in enabled_estimators:
             xhat_nmhe, nmhe_time = sim.run_estimation(NMHE, xhover_est)
-            rmse_nmhe = np.sqrt(np.mean((xvec - xhat_nmhe)**2))
+            rmse_nmhe = np.sqrt(np.mean((xvec[t0:] - xhat_nmhe[t0:])**2))
 
-        print("                     RMSE\tAvg. step time (ms)")
+        print(f"(k={t0:.0f} onwards)      RMSE\tAvg. step time (ms)")
         if 'KF' in enabled_estimators:      print(f"KF                : {rmse_kf:.4f}\t\t{kf_time*1000./N:.4f}")
         if 'EKF' in enabled_estimators:     print(f"EKF               : {rmse_ekf:.4f}\t\t{ekf_time*1000./N:.4f}")
         if 'LMHE1' in enabled_estimators:   print(f"LMHE1 (CVXPY)     : {rmse_lmhe1:.4f}\t\t{lmhe1_time*1000./N:.4f}")
@@ -392,28 +415,27 @@ if __name__ == "__main__":
     main(
         enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
         v_means=np.zeros(9),
-        # v_means = np.array([.1, 0., .1, 0., .1, 0., -.1, -.1, -.1]),
-        v_stds=np.array([.02, .5, .02, .5, .02, .5, .03, .03, .03])/3,
         w_means=np.zeros(16),
+        # v_means = np.array([.1, 0., .1, 0., .1, 0., -.1, -.1, -.1]),
         # w_means = np.array([.1, -.5, .1, -.5, .1, -.5,
         #                     0., 0., 0., 0., 0., 0.,
         #                     0., 0., 0., 0.]),
+        v_stds=np.array([.02, .5, .02, .5, .02, .5, .03, .03, .03])/3,
         w_stds=np.array([.1, 2., .1, 2., .1, 2.,
                          .1, .1, .1, .5, .5, .5,
                          10., 10., 10., 10. ])/3,
         X0=None,
         P0=np.eye(16) * 1e0,
-        Q=np.diag([ .1, 2., .1, 2., .1, 2.,
-                    .1, .1, .1, .5, .5, .5,
-                    10., 10., 10., 10. ])**.5,
-        R=np.diag([.02, .5, .02, .5, .02, .5, .03, .03, .03])**.5,
+        Q=np.diag([.05]*16),  # override both Q,R to use these (bad) values for estimation
+        R=np.diag([.01]*9),   # lower Q means trust model more than measurements (so MHE can do better, EKF worse)
         T=5.,
         # ts=0.001,
-        # loops=5,
+        loops=5,
         # mhe_horizon  = 30,
-        mhe_update   = "smoothing_naive",     # "filtering", "smoothing", or "smoothing_naive"
-        prior_method = "ekf",           # "zero", "uniform", "ekf"
-        # solver       = "pcip_l1ao",  # None, "pcip", "pcip_l1ao" - doesn't use anymore
+        mhe_update   = "smoothing_naive",     # "filtering" (default), "smoothing", or "smoothing_naive"
+        prior_method = "ekf",           # "zero", "uniform", "ekf" (default)
+        # time_varying_measurement_noise = True,
+        # bad_model_knowledge = True,
         # save_csv=True,
         enable_plot=True
     )

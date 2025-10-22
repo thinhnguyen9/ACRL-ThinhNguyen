@@ -34,6 +34,13 @@ class KF():
             self.xs, self.us = xs, us
             self.A, self.B, self.G, self.C = self.model.linearize(xs, us)
 
+    def update_covariance(self, Q, R):
+        """
+        In case of time-varying Q, R matrices.
+        """
+        self.Q = Q
+        self.R = R
+
     def prediction(self, x0, u0):
         """
         Predict the mean and covariance of xhat(k+1) before correction.

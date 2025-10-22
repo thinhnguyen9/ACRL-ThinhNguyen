@@ -5,15 +5,16 @@ class L1AOQP():
     L1 Adaptive Optimization solver for (unconstrained) Quadratic Program:
         minimize 0.5 z^T H z + f^T z
     """
-    def __init__(self, ts):
+    def __init__(self, ts, a, lpf_omega, estimate_grad_zt=False):
         self.ts = ts
+        self.estimate_grad_zt = estimate_grad_zt
 
         # As: diagonal Hurwitz matrix (assume As = diag([a, a, ..., a]), a<0)
-        self.a = -100.    # TODO: tune??
+        self.a = a
         self.dim = 0
 
         # Low-pass filter
-        self.lpf_omega = 1.   # TODO: tune??
+        self.lpf_omega = lpf_omega
 
     def dimension_update(self, dim):
         """
@@ -33,8 +34,19 @@ class L1AOQP():
         return x0 + self.lpf_omega*(u - x0)*self.ts
 
     def set_QP(self, H, f):
-        self.H = H
-        self.f = f
+        # preserve previous copies (if present) and store new copies
+        # for dH/dt, df/dt estimation using finite differences
+        if hasattr(self, 'H'):
+            self.H0 = self.H.copy()
+        else:
+            self.H0 = None
+        if hasattr(self, 'f'):
+            self.f0 = self.f.copy()
+        else:
+            self.f0 = None
+        # store new QP data as copies to avoid external mutation
+        self.H = np.array(H, copy=True)
+        self.f = np.array(f, copy=True)
     
     def dynamics(self, z0, za_dot0, grad_phi_hat0, zb_dot):
         """
@@ -54,10 +66,18 @@ class L1AOQP():
         grad_phi = self.H @ z0 + self.f
         hess_phi = self.H
 
+        # Estimate grad_zt by finite difference
+        if self.estimate_grad_zt \
+                and self.H0 is not None and self.f0 is not None \
+                and self.H0.shape[0]==self.H.shape[0]:
+            grad_zt = (grad_phi - self.H0 @ z0 - self.f0)/self.ts
+        else:
+            grad_zt = np.zeros_like(z0)
+
         # Gradient predictor
         e = grad_phi_hat0 - grad_phi
         h = self.mu @ e
-        grad_phi_hat = grad_phi_hat0 + (self.As @ e + hess_phi @ (za_dot0 + zb_dot) + h)*self.ts
+        grad_phi_hat = grad_phi_hat0 + (self.As @ e + grad_zt + hess_phi @ (za_dot0 + zb_dot) + h)*self.ts
 
         # L1AO
         sigma_hat = np.linalg.solve(hess_phi, h)
