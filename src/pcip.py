@@ -8,44 +8,42 @@ class PCIPQP:
     """
     def __init__(self, alpha, ts, estimate_grad_zt=False):
         self.alpha   = alpha       # correction gain
-        self.tau     = ts          # Euler step
+        self.ts      = ts          # Euler step
         self.estimate_grad_zt = estimate_grad_zt
     
     def set_QP(self, H, f):
-        # preserve previous copies (if present) and store new copies
-        # for dH/dt, df/dt estimation using finite differences
-        if hasattr(self, 'H'):
-            self.H0 = self.H.copy()
+        if hasattr(self, 'H') and hasattr(self, 'f'):
+            self.H0 = self.H
+            self.f0 = self.f
         else:
-            self.H0 = None
-        if hasattr(self, 'f'):
-            self.f0 = self.f.copy()
-        else:
-            self.f0 = None
-        # store new QP data as copies to avoid external mutation
-        self.H = np.array(H, copy=True)
-        self.f = np.array(f, copy=True)
+            self.H0 = H
+            self.f0 = f
+        self.H = H
+        self.f = f
 
     def dynamics(self, z0):
         grad_phi = self.H @ z0 + self.f
         hess_phi = self.H
 
-        # Estimate grad_zt by finite difference
-        if self.estimate_grad_zt \
-                and self.H0 is not None and self.f0 is not None \
-                and self.H0.shape[0]==self.H.shape[0]:
-            g_pred = (grad_phi - self.H0 @ z0 - self.f0)/self.tau
+        diff = self.H.shape[0] - self.H0.shape[0]
+        if diff == 0:   # QP size fixed
+            grad_phi0 = self.H0 @ z0 + self.f0
+            # hess_phi0 = self.H0
+        else:   # QP size grew
+            grad_phi0 = np.hstack([
+                self.H0 @ z0[:-diff] + self.f0,
+                grad_phi[-diff:]
+            ])
+            # hess_phi0 = self.H.copy()
+            # hess_phi0[:-diff, :-diff] = self.H0.copy()
+
+        # Estimate grad_zt_phi by finite difference
+        if self.estimate_grad_zt:
+            grad_zt = (grad_phi - grad_phi0)/self.ts
         else:
-            g_pred = np.zeros_like(z0)
+            grad_zt = np.zeros_like(z0)
 
-        # Solve Newton system
-        delta = np.linalg.solve(hess_phi, -self.alpha*grad_phi - g_pred)
-        # L = cholesky(hess_phi, lower=True)  # Cholesky decomposition
-        # y = solve_triangular(L, -self.alpha*grad_phi - g_pred, lower=True)  # Solve Ly = b
-        # delta = solve_triangular(L.T, y)  # Solve L.T x = y
-        # delta = np.linalg.inv(H) @ rhs    # slow, not accurate
-        # delta = np.zeros_like(z0)
-
-        # Euler integration step
-        z = z0 + self.tau*delta
-        return delta, z
+        # Solution
+        zdot = np.linalg.solve(hess_phi, -self.alpha*grad_phi - grad_zt)
+        z = z0 + self.ts*zdot  # z(T+1)!!
+        return zdot, z

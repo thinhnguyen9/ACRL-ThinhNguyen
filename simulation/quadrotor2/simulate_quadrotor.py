@@ -1,0 +1,426 @@
+import numpy as np
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
+import sys
+import pathlib
+from math import sin, cos
+import cvxpy as cp
+import copy
+import time
+import csv
+from datetime import datetime
+
+sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
+from src.kf import KF
+from src.mhe import MHE
+from models.quadrotors import Quadrotor2
+from src.simulator import Simulator
+
+def main(
+        enabled_estimators,
+        v_means,    # Measurement noise (gaussian)
+        v_stds,     # max error ~ 3 std.dev.
+        w_means,    # Process noise (gaussian)
+        w_stds,     # max error ~ 3 std.dev.
+        X0,         # initial estmate (unused in this simulation)
+        P0,         # initial covariance
+        trajectory_shape='p2p',
+        Q=None,     # weighting matrix, override if needed
+        R=None,     # weighting matrix, override if needed
+        T=1.0,
+        t0=0,
+        ts=0.01,
+        loops=1,
+        mhe_horizon=10,
+        mhe_update="filtering",
+        prior_method="ekf",
+        time_varying_measurement_noise=False,
+        bad_model_knowledge=False,
+        save_csv=False,
+        enable_plot=False
+    ):
+    
+    # ----------------------- Quadrotor -----------------------
+    drone = Quadrotor2(
+        m=1.0,
+        g=9.81,
+        J=np.diag([0.005, 0.005, 0.009])
+    )
+    if bad_model_knowledge:
+        drone_est = Quadrotor2(     # used for estimation
+            m=1.5,
+            g=9.81,
+            J=np.diag([0.005, 0.005, 0.009])*1.2
+        )
+    else:
+        drone_est = copy.deepcopy(drone)
+    
+    xhover_est = np.zeros(drone_est.Nx)
+    uhover_est = np.array([drone_est.m*drone_est.g, 0, 0, 0])
+
+    # ----------------------- Simulation -----------------------
+    if Q is not None and R is not None:
+        use_QR_guess = True
+    else:
+        use_QR_guess = False
+        if Q is None:   Q = np.diag(w_stds**2)
+        if R is None:   R = np.diag(v_stds**2)
+    print("\n")
+    print("=================== Simulation settings ===================")
+    print(f"Simulation time    : {T:.1f} s")
+    print(f"Sampling period    : {ts/1e-3:.1f} ms")
+    print(f"Loops              : {loops:.0f}")
+    print(f"Time-varying noise : " + str(time_varying_measurement_noise))
+    print(f"Use Q,R guesses    : " + str(use_QR_guess))
+    print("======================= MHE settings ======================")
+    print(f"Horizon            : {mhe_horizon:.0f}")
+    print(f"MHE scheme         : " + mhe_update)
+    print(f"Prior weighting    : " + prior_method)
+
+    sim = Simulator(
+        mode = 'quadrotor',
+        sys = drone,
+        w_means = w_means,
+        w_stds = w_stds,
+        v_means = v_means,
+        v_stds = v_stds,
+        T = T,
+        ts = ts,
+        # noise_distribution = 'uniform',
+        time_varying_measurement_noise = time_varying_measurement_noise,
+        use_QR_guess = use_QR_guess,
+        Q_guess = Q,
+        R_guess = R
+    )
+    t0 = int(t0/ts)
+
+    # ----------------------- Run estimation -----------------------
+    for loop in range(loops):
+        print("================ Simulation instance " + str(loop+1) + " of " + str(loops) + " ================")
+        # Initialize estimators - must be done every loop
+        if 'KF' in enabled_estimators:
+            SKF = KF(
+                model = drone_est,
+                ts = sim.get_time_step(),
+                P0 = P0,
+                type = "standard",
+                xs = xhover_est,
+                us = uhover_est
+            )
+        if 'EKF' in enabled_estimators:
+            EKF = KF(
+                model = drone_est,
+                ts = sim.get_time_step(),
+                P0 = P0,
+                type = "extended"
+            )
+        if 'LMHE1' in enabled_estimators:
+            LMHE_cvxpy = MHE(
+                model = drone_est,
+                ts = sim.get_time_step(),
+                N = mhe_horizon,
+                X0 = xhover_est,
+                P0 = P0,
+                mhe_type = "linearized_every",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
+                solver = None,
+                xs = xhover_est,
+                us = uhover_est
+            )
+        if 'LMHE2' in enabled_estimators:
+            LMHE_pcip = MHE(
+                model = drone_est,
+                ts = sim.get_time_step(),
+                N = mhe_horizon,
+                X0 = xhover_est,
+                P0 = P0,
+                mhe_type = "linearized_every",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
+                solver = "pcip",
+                xs = xhover_est,
+                us = uhover_est
+            )
+        if 'LMHE3' in enabled_estimators:
+            LMHE_pcip_l1ao = MHE(
+                model = drone_est,
+                ts = sim.get_time_step(),
+                N = mhe_horizon,
+                X0 = xhover_est,
+                P0 = P0,
+                mhe_type = "linearized_every",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
+                solver = "pcip_l1ao",
+                xs = xhover_est,
+                us = uhover_est
+            )
+        if 'NMHE' in enabled_estimators:
+            NMHE = MHE(
+                model = drone_est,
+                ts = sim.get_time_step(),
+                N = mhe_horizon,
+                X0 = xhover_est,
+                P0 = P0,
+                mhe_type = "nonlinear",
+                mhe_update = mhe_update,
+                prior_method = prior_method,
+                solver = None,  # nonlinear MHE cannot use QP PCIP!!
+                xs = xhover_est,
+                us = uhover_est
+            )
+
+        tvec, xvec, uvec, yvec = sim.simulate_quadrotor_lqr_control(
+                traj_mode = trajectory_shape,
+                # x0 = copy.deepcopy(xhover_est),
+                # x0 = np.array([ 0., 0., 0., 0., -1., 0.,
+                #                 .35, -.35, 0.,
+                #                 0., 0., 0.,
+                #                 drone.f_h*.8, drone.f_h*.9, drone.f_h*1.2, drone.f_h*1.1 ]),
+                # zero_disturbance = True,
+                # zero_noise = True
+        )
+        N = len(tvec)
+        if 'KF' in enabled_estimators:
+            xhat_kf, kf_time = sim.run_estimation(SKF, xhover_est)
+            rmse_kf = np.sqrt(np.mean((xvec[t0:] - xhat_kf[t0:])**2))
+        if 'EKF' in enabled_estimators:
+            xhat_ekf, ekf_time = sim.run_estimation(EKF, xhover_est)
+            rmse_ekf = np.sqrt(np.mean((xvec[t0:] - xhat_ekf[t0:])**2))
+        if 'LMHE1' in enabled_estimators:
+            xhat_lmhe1, lmhe1_time = sim.run_estimation(LMHE_cvxpy, xhover_est)
+            rmse_lmhe1 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe1[t0:])**2))
+        if 'LMHE2' in enabled_estimators:
+            xhat_lmhe2, lmhe2_time = sim.run_estimation(LMHE_pcip, xhover_est)
+            rmse_lmhe2 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe2[t0:])**2))
+        if 'LMHE3' in enabled_estimators:
+            xhat_lmhe3, lmhe3_time = sim.run_estimation(LMHE_pcip_l1ao, xhover_est)
+            rmse_lmhe3 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe3[t0:])**2))
+        if 'NMHE' in enabled_estimators:
+            xhat_nmhe, nmhe_time = sim.run_estimation(NMHE, xhover_est)
+            rmse_nmhe = np.sqrt(np.mean((xvec[t0:] - xhat_nmhe[t0:])**2))
+
+        print(f"(k={t0:.0f} onwards)      RMSE\tAvg. step time (ms)")
+        if 'KF' in enabled_estimators:      print(f"KF                : {rmse_kf:.4f}\t\t{kf_time*1000./N:.4f}")
+        if 'EKF' in enabled_estimators:     print(f"EKF               : {rmse_ekf:.4f}\t\t{ekf_time*1000./N:.4f}")
+        if 'LMHE1' in enabled_estimators:   print(f"LMHE1 (CVXPY)     : {rmse_lmhe1:.4f}\t\t{lmhe1_time*1000./N:.4f}")
+        if 'LMHE2' in enabled_estimators:   print(f"LMHE2 (PCIP)      : {rmse_lmhe2:.4f}\t\t{lmhe2_time*1000./N:.4f}")
+        if 'LMHE3' in enabled_estimators:   print(f"LMHE3 (PCIP+L1AO) : {rmse_lmhe3:.4f}\t\t{lmhe3_time*1000./N:.4f}")
+        if 'NMHE' in enabled_estimators:    print(f"NMHE              : {rmse_nmhe:.4f}\t\t{nmhe_time*1000./N:.4f}")
+        # if 'EKF' in enabled_estimators and 'LMHE1' in enabled_estimators:
+        #     print("----------------------------")
+        #     print(f"LMHE1-EKF RMSE: {np.sqrt(np.mean((xhat_lmhe1 - xhat_ekf)**2)):.4f}")
+
+        # Save results of this instance
+        if save_csv:
+            data = []
+            date_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
+            # date,estimator,RMSE,max_err,computation_time_per_step,T,ts
+            if 'KF' in enabled_estimators:      data.append([date_str, 'KF',    rmse_kf,    np.max(np.abs(xvec-xhat_kf)),    kf_time*1000./N,    T, ts])
+            if 'EKF' in enabled_estimators:     data.append([date_str, 'EKF',   rmse_ekf,   np.max(np.abs(xvec-xhat_ekf)),   ekf_time*1000./N,   T, ts])
+            if 'LMHE1' in enabled_estimators:   data.append([date_str, 'LMHE1', rmse_lmhe1, np.max(np.abs(xvec-xhat_lmhe1)), lmhe1_time*1000./N, T, ts])
+            if 'LMHE2' in enabled_estimators:   data.append([date_str, 'LMHE2', rmse_lmhe2, np.max(np.abs(xvec-xhat_lmhe2)), lmhe2_time*1000./N, T, ts])
+            if 'NMHE' in enabled_estimators:    data.append([date_str, 'NMHE',  rmse_nmhe,  np.max(np.abs(xvec-xhat_nmhe)),  nmhe_time*1000./N,  T, ts])
+            with open('simulation/quadrotor/sim_instances.csv', 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerows(data)
+    print("============================================================")
+    xhat = xhat_ekf if 'EKF' in enabled_estimators else np.zeros_like(xvec)
+    with open('simulation/quadrotor2/sim_data.npy', 'wb') as f:
+        np.save(f, tvec)
+        np.save(f, xvec)
+        np.save(f, xhat)
+        np.save(f, yvec)
+        np.save(f, uvec)
+    print("Simulation data saved to 'sim_data.npy'")
+    print("\n")
+
+    # ----------------------- Plot results -----------------------
+    if enable_plot:
+        
+        if 'KF' in enabled_estimators:      rmse_kf     = np.sqrt(np.mean((xvec - xhat_kf)**2, axis=0))
+        if 'EKF' in enabled_estimators:     rmse_ekf    = np.sqrt(np.mean((xvec - xhat_ekf)**2, axis=0))
+        if 'LMHE1' in enabled_estimators:   rmse_lmhe1  = np.sqrt(np.mean((xvec - xhat_lmhe1)**2, axis=0))
+        if 'LMHE2' in enabled_estimators:   rmse_lmhe2  = np.sqrt(np.mean((xvec - xhat_lmhe2)**2, axis=0))
+        if 'LMHE3' in enabled_estimators:   rmse_lmhe3  = np.sqrt(np.mean((xvec - xhat_lmhe3)**2, axis=0))
+        if 'NMHE' in enabled_estimators:    rmse_nmhe   = np.sqrt(np.mean((xvec - xhat_nmhe)**2, axis=0))
+
+        def plot_state(idx, ylabel=None, invert_y=False, rad2deg=False, title_prefix=''):
+            plt.plot(tvec, xvec[:,idx]*(180/np.pi if rad2deg else 1), 'k-', lw=3., label=title_prefix+'_true')
+            if idx in [0, 1, 2]:
+                plt.plot(tvec, yvec[:,idx]*(180/np.pi if rad2deg else 1), 'k:', lw=0.5, label=title_prefix+'_meas')
+            if idx in [9, 10, 11]:
+                plt.plot(tvec, yvec[:,idx-6]*(180/np.pi if rad2deg else 1), 'k:', lw=0.5, label=title_prefix+'_meas')
+            if 'KF' in enabled_estimators:
+                plt.plot(tvec, xhat_kf[:,idx]*(180/np.pi if rad2deg else 1), 'r-', lw=1., label='KF')
+            if 'EKF' in enabled_estimators:
+                plt.plot(tvec, xhat_ekf[:,idx]*(180/np.pi if rad2deg else 1), color='tab:red', ls='-', lw=1.5, label='EKF')
+            if 'LMHE1' in enabled_estimators:
+                plt.plot(tvec, xhat_lmhe1[:,idx]*(180/np.pi if rad2deg else 1), color='tab:blue', ls='-', lw=1.5, label='LMHE1')
+            if 'LMHE2' in enabled_estimators:
+                plt.plot(tvec, xhat_lmhe2[:,idx]*(180/np.pi if rad2deg else 1), color='tab:orange', ls='-', lw=1.5, label='LMHE2')
+            if 'LMHE3' in enabled_estimators:
+                plt.plot(tvec, xhat_lmhe3[:,idx]*(180/np.pi if rad2deg else 1), color='tab:green', ls='-', lw=1.5, label='LMHE3')
+            if 'NMHE' in enabled_estimators:
+                plt.plot(tvec, xhat_nmhe[:,idx]*(180/np.pi if rad2deg else 1), 'y-', lw=1., label='NMHE')
+            plt.grid()
+            # plt.ylim((-2,2))
+            leg = plt.legend()
+            leg.set_draggable(True)
+            if ylabel: plt.ylabel(ylabel)
+            if invert_y: plt.gca().invert_yaxis()
+            # Compose RMSE string only for enabled estimators
+            rmse_str = []
+            if 'KF' in enabled_estimators:      rmse_str.append(f"KF={rmse_kf[idx]*(180/np.pi if rad2deg else 1):.4f}")
+            if 'EKF' in enabled_estimators:     rmse_str.append(f"EKF={rmse_ekf[idx]*(180/np.pi if rad2deg else 1):.4f}")
+            if 'LMHE1' in enabled_estimators:   rmse_str.append(f"LMHE1={rmse_lmhe1[idx]*(180/np.pi if rad2deg else 1):.4f}")
+            if 'LMHE2' in enabled_estimators:   rmse_str.append(f"LMHE2={rmse_lmhe2[idx]*(180/np.pi if rad2deg else 1):.4f}")
+            if 'LMHE3' in enabled_estimators:   rmse_str.append(f"LMHE3={rmse_lmhe3[idx]*(180/np.pi if rad2deg else 1):.4f}")
+            if 'NMHE' in enabled_estimators:    rmse_str.append(f"NMHE={rmse_nmhe[idx]*(180/np.pi if rad2deg else 1):.4f}")
+            plt.title(f"{title_prefix} RMSE: {', '.join(rmse_str)}", fontsize=10)
+
+        plt.figure(1)
+        plt.suptitle('Estimators comparison')
+
+        # -------------- X, Y, Z --------------
+        plt.subplot(4,3,1)
+        plot_state(0, ylabel='Position - world (m)', title_prefix='x')
+        plt.subplot(4,3,2)
+        plot_state(1, title_prefix='y')
+        plt.subplot(4,3,3)
+        plot_state(2, title_prefix='z')
+        # -------------- Xd, Yd, Zd --------------
+        plt.subplot(4,3,4)
+        plot_state(3, ylabel='Velocity - world (m/s)', title_prefix='xd')
+        plt.subplot(4,3,5)
+        plot_state(4, title_prefix='yd')
+        plt.subplot(4,3,6)
+        plot_state(5, title_prefix='zd')
+        # -------------- roll, pitch, yaw --------------
+        plt.subplot(4,3,7)
+        plot_state(6, ylabel='Angles - world (deg)', rad2deg=True, title_prefix='roll')
+        plt.subplot(4,3,8)
+        plot_state(7, rad2deg=True, title_prefix='pitch')
+        plt.subplot(4,3,9)
+        plot_state(8, rad2deg=True, title_prefix='yaw')
+        # -------------- p, q, r --------------
+        plt.subplot(4,3,10)
+        plot_state(9, ylabel='Angular rates - body (rad/s)', title_prefix='p')
+        plt.xlabel('Time (s)')
+        plt.subplot(4,3,11)
+        plot_state(10, title_prefix='q')
+        plt.xlabel('Time (s)')
+        plt.subplot(4,3,12)
+        plot_state(11, title_prefix='r')
+        plt.xlabel('Time (s)')
+
+        plt.figure(2)
+        plt.suptitle('Control inputs')
+        
+        plt.subplot(2,1,1)
+        plt.plot(tvec, uvec[:,0], 'k-', lw=1.)
+        plt.ylabel('Total thrust (N)')
+        plt.grid()
+        plt.subplot(2,1,2)
+        plt.plot(tvec, uvec[:,1], 'r-', lw=1., label=r'$\tau_x$')
+        plt.plot(tvec, uvec[:,2], 'g-', lw=1., label=r'$\tau_y$')
+        plt.plot(tvec, uvec[:,3], 'b-', lw=1., label=r'$\tau_z$')
+        plt.ylabel('Total torque (Nm)')
+        plt.xlabel('Time (s)')
+        leg = plt.legend()
+        leg.set_draggable(True)
+        plt.grid()
+
+        def plot_error(idx, ylabel=None, title_prefix=''):
+            if 'KF' in enabled_estimators:
+                plt.plot(tvec, xvec[:,idx]-xhat_kf[:,idx], 'r-', lw=1., label='KF')
+            if 'EKF' in enabled_estimators:
+                plt.plot(tvec, xvec[:,idx]-xhat_ekf[:,idx], 'b-', lw=1., label='EKF')
+            if 'LMHE1' in enabled_estimators:
+                plt.plot(tvec, xvec[:,idx]-xhat_lmhe1[:,idx], 'm-', lw=1., label='LMHE1')
+            if 'LMHE2' in enabled_estimators:
+                plt.plot(tvec, xvec[:,idx]-xhat_lmhe2[:,idx], 'c-', lw=1., label='LMHE2')
+            if 'NMHE' in enabled_estimators:
+                plt.plot(tvec, xvec[:,idx]-xhat_nmhe[:,idx], 'y-', lw=1., label='NMHE')
+            if 'EKF' in enabled_estimators and 'LMHE2' in enabled_estimators:
+                plt.plot(tvec, xhat_lmhe2[:,idx]-xhat_ekf[:,idx], 'k--', lw=1., label='LMHE2-EKF')
+            plt.grid()
+            leg = plt.legend()
+            leg.set_draggable(True)
+            if ylabel: plt.ylabel(ylabel)
+            plt.title(title_prefix, fontsize=10)
+
+        # plt.figure(3)
+        # plt.suptitle('Estimation error (by state)')
+        # for idx in range(drone.Nx):
+        #     plt.subplot(4, 4, idx+1)
+        #     plot_error(idx)
+
+        if 'EKF' in enabled_estimators:
+            plt.figure(4)
+            plt.suptitle('Estimation error')
+            err_ekf   = np.linalg.norm(xvec - xhat_ekf, axis=1)
+            if 'LMHE1' in enabled_estimators:   err_lmhe1 = np.linalg.norm(xvec - xhat_lmhe1, axis=1)
+            if 'LMHE2' in enabled_estimators:   err_lmhe2 = np.linalg.norm(xvec - xhat_lmhe2, axis=1)
+            if 'LMHE3' in enabled_estimators:   err_lmhe3 = np.linalg.norm(xvec - xhat_lmhe3, axis=1)
+
+            plt.subplot(211)
+            plt.plot(tvec, err_ekf, color='tab:red', ls='-', lw=1.5, label='EKF')
+            if 'LMHE1' in enabled_estimators:   plt.plot(tvec, err_lmhe1, color='tab:blue', ls='-', lw=1.5, label='LMHE1')
+            if 'LMHE2' in enabled_estimators:   plt.plot(tvec, err_lmhe2, color='tab:orange', ls='-', lw=1.5, label='LMHE2')
+            if 'LMHE3' in enabled_estimators:   plt.plot(tvec, err_lmhe3, color='tab:green', ls='-', lw=1.5, label='LMHE3')
+            plt.grid()
+            plt.ylabel(r'$\|x - \hat{x}\|$', fontsize=10)
+            leg = plt.legend()
+            leg.set_draggable(True)
+
+            plt.subplot(212)
+            plt.axhline(0.0, color='tab:red', linestyle='--', linewidth=2.)
+            if 'LMHE1' in enabled_estimators:   plt.plot(tvec, err_lmhe1-err_ekf, color='tab:blue', ls='-', lw=1.5, label='LMHE1-EKF')
+            if 'LMHE2' in enabled_estimators:   plt.plot(tvec, err_lmhe2-err_ekf, color='tab:orange', ls='-', lw=1.5, label='LMHE2-EKF')
+            if 'LMHE3' in enabled_estimators:   plt.plot(tvec, err_lmhe3-err_ekf, color='tab:green', ls='-', lw=1.5, label='LMHE3-EKF')
+            plt.grid()
+            plt.xlabel('Time (s)')
+            plt.ylabel('LMHE - EKF')
+            leg = plt.legend()
+            leg.set_draggable(True)
+
+        plt.show()
+
+
+if __name__ == "__main__":
+    """
+    Working estimators: "KF", "EKF",
+                        "LMHE1" (CVXPY OSQP/ECOS),
+                        "LMHE2" (PCIP),
+                        "LMHE3" (PCIP+L1AO)
+    Working MHE update schemes: "filtering" (equivalent to the EKF),
+                                "smoothing_naive" (unstable for class Quadrotor2),
+                                "smoothing" (works best for class Quadrotor2)
+    Might need to retune (Q, R, PCIP, L1AO) for different schemes.
+    """
+    main(
+        enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
+        trajectory_shape='triangle',  # 'p2p' (default), 'circle, 'triangle'
+        v_means=np.zeros(6),
+        w_means=np.zeros(12),
+        v_stds=np.array([.5, .5, .5, .3, .3, .3])/3,
+        w_stds=np.array([1e-1, 1e-1, 1e-1, 2., 2., 2.,
+                         1e-1, 1e-1, 1e-1, .5, .5, .5])/3,
+        X0=None,
+        P0=np.eye(12) * 1e0,
+        Q=np.diag([1.]*12),  # override both Q,R to use these (bad) values for estimation
+        R=np.diag([1.]*6),   # lower Q = trust model, lower R = trust measurements
+        T=10.,
+        t0=0.,  # time to start RMSE calculation (to skip transient phase)
+        # ts=0.001,
+        # loops=5,
+        # mhe_horizon  = 24,
+        mhe_update   = "smoothing",     # "filtering" (default), "smoothing", or "smoothing_naive"
+        # prior_method = "uniform",           # "zero", "uniform", "ekf" (default)
+        # time_varying_measurement_noise = True,
+        # bad_model_knowledge = True,
+        # save_csv=True,
+        enable_plot=True
+    )

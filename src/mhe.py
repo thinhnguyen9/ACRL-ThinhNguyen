@@ -10,13 +10,11 @@ from src.utils import build_mhe_qp_with_dyn_constraints, build_mhe_qp_with_dyn_c
 
 class MHE():
 
-    def __init__(self, model, ts, Q, R, N, X0, P0, xs, us, mhe_type="linearized_once", mhe_update="filtering", prior_method="zero", solver=None):
+    def __init__(self, model, ts, N, X0, P0, xs, us, mhe_type="linearized_once", mhe_update="filtering", prior_method="zero", solver=None):
         """
         Args:
             model: dynamical model object
             ts: sampling time (for discretization)
-            Q: process noise covariance
-            R: measurement noise covariance
             N: prediction horizon
             X0: mean of initial state (shape: (Nx,))
             P0: covariance of initial state (shape: (Nx, Nx))
@@ -37,11 +35,7 @@ class MHE():
         self.Nu = model.Nu  # inputs
         self.Ny = model.Ny  # outputs
         self.ts = ts        # sampling time
-        self.Q = Q      # process noise covariance
-        self.R = R      # measurement noise covariance
         self.N = N      # prediction horizon
-        self.Q_inv = np.linalg.inv(self.Q)
-        self.R_inv = np.linalg.inv(self.R)
         
         self.xs = xs
         self.us = us
@@ -69,6 +63,7 @@ class MHE():
         self.Pvec[0] = P0
         self.Pvec1[0] = P0
         self.P0 = P0
+        self.X0 = X0
 
         if self.solver in ["pcip", "pcip_l1ao"]:
             self.pcip = PCIPQP(
@@ -79,9 +74,10 @@ class MHE():
         if self.solver == "pcip_l1ao":
             self.l1ao = L1AOQP(
                 ts=self.ts,
-                a=-1.,         # diagonal Hurwitz As matrix
-                lpf_omega=30.,  # low-pass filter bandwidth
-                estimate_grad_zt=True   # estimate grad_zt_phi by finite differences
+                a=-.1,         # diagonal Hurwitz As matrix
+                lpf_omega=50.,   # low-pass filter bandwidth
+                estimate_grad_zt=True,  # estimate grad_zt_phi by finite differences
+                # clip_zdot=True          # clip za_dot for stability
             )
 
     def updateModel(self, A, B, G, C):
@@ -91,7 +87,7 @@ class MHE():
         self.G = G*self.ts
         self.C = C
 
-    def doEstimation(self, yvec, uvec, Qinv_seq, Rinv_seq):
+    def doEstimation(self, yvec, uvec, Qinv_seq, Rinv_seq, Q_seq, R_seq):
         """
         Run MHE to estimate state trajectory over the horizon.
         
@@ -100,6 +96,8 @@ class MHE():
             uvec: sequence of inputs u(0)...u(T-1)
             Qinv_seq: Q(0)^{-1}...Q(T)^{-1}
             Rinv_seq: R(0)^{-1}...R(T)^{-1}
+            Q_seq: Q(0)...Q(T) (used by smoothing scheme)
+            R_seq: R(0)...R(T) (used by smoothing scheme)
         Returns:
             Estimated current state x(T)
         """
@@ -111,15 +109,20 @@ class MHE():
         if np.size(uvec, 0) != T:
             raise ValueError("yvec and uvec did not agree in size (yvec must have N+1 rows, uvec must have N rows)!")
         
-        if T < self.N:
-            # Do Full Information Estimation (FIE) if T < N
+        if T <= self.N:
+            # Do Full Information Estimation (FIE) if T <= N
             # self.xvec  : x(0)...x(T-1)
             # self.Pvec  : P(0)...P(T|T-1)
             # self.Pvec1 : P(0)...P(T-1|T-1)
-            X0 = self.xvec[0]   # x(0)
-            if self.prior_method == "zero":         pass
-            elif self.prior_method == "uniform":    P0 = self.P0
-            elif self.prior_method == "ekf":        P0 = self.Pvec[0]   # P(0)
+            if self.mhe_update == "filtering":
+                X0 = self.X0    # self.xvec[0] was overriden, for filtering MHE we need to use fixed X0
+            elif self.mhe_update in ["smoothing", "smoothing_naive"]:
+                X0 = self.xvec[0]
+            P0 = self.P0
+            # X0 = self.xvec[0]   # x(0)
+            # if self.prior_method == "zero":         pass
+            # elif self.prior_method == "uniform":    P0 = self.P0
+            # elif self.prior_method == "ekf":        P0 = self.Pvec[0]   # P(0)
             yseq_raw = yvec    # y(0)...y(T)
             useq_raw = uvec    # u(0)...u(T-1)
         
@@ -135,9 +138,53 @@ class MHE():
             useq_raw = uvec[-self.N :]     # u(T-N)...u(T-1)
             Qinv_seq = Qinv_seq[-self.N-1 :] # (T-N)...(T)
             Rinv_seq = Rinv_seq[-self.N-1 :] # (T-N)...(T)
+            Q_seq = Q_seq[-self.N-1 :]  # (T-N)...(T)
+            R_seq = R_seq[-self.N-1 :]  # (T-N)...(T)
 
         # %% ========================================================================================================= #
-        #           TODO: Backward interation to find P(T-1|T-1)...P(T-N|T-1) for smoothing scheme
+        #                                               LINEARIZATION
+        # ============================================================================================================ #
+        if self.mhe_type == "linearized_once":
+            X0 = X0 - self.xs
+            y = yseq_raw - self.C @ self.xs
+            u = useq_raw - self.us
+
+        elif self.mhe_type == "linearized_every":
+            if self.mhe_update == "filtering":
+                # Use nonlinear model to get nominal trajectory
+                xnom = np.zeros((N+1, self.Nx))     # x(T-N)...x(T)
+                xnom[0] = X0
+                for k in range(N):
+                    xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k])*self.ts
+
+            elif self.mhe_update in ["smoothing", "smoothing_naive"]:
+                # Use nonlinear model to get nominal trajectory
+                # xnom = np.zeros((N+1, self.Nx))     # x(T-N)...x(T)
+                # xnom[0] = X0
+                # for k in range(N):
+                #     xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k])*self.ts
+                    
+                # # Use self.xvec as nominal trajectory
+                if T == 0:
+                    # self.xvec  : x(0)prior
+                    xnom = self.xvec
+                else:
+                    # self.xvec  : x(0)...x(T-1), OR
+                    # self.xvec  : x(T-N-1)...x(T-1)
+                    xTnom = self.xvec[-1] + self.model.dx(self.xvec[-1], useq_raw[-1])*self.ts
+                    xnom = np.concatenate((self.xvec[-self.N:], xTnom.reshape((1,self.Nx))), axis=0)
+
+            X0 = np.zeros(self.Nx)
+            y = yseq_raw - xnom @ self.C.T
+            u = np.zeros((N, self.Nu))
+
+        elif self.mhe_type == "nonlinear":
+            # X0 = X0
+            y = yseq_raw
+            u = useq_raw
+
+        # %% ========================================================================================================= #
+        #           Backward interation to find P(T-1|T-1)...P(T-N|T-1) for smoothing scheme
         #           RAUCH, TUNG and STRIEBEL, 1965
         # ============================================================================================================ #
         if self.mhe_update == "smoothing" and N > 1:
@@ -160,55 +207,9 @@ class MHE():
                 # start: k=T-2, end: k=T-N
                 P_temp = self.Pvec1[-i-2] + C @ (P_temp - self.Pvec[-i-2]) @ C.T    # P(T-2|T-1)
             P0 = P_temp
-        
-            # adjust arrival cost for y(T-N)...y(T-1) (len: N)
-            O = np.zeros((self.Ny*N, self.Nx*N))
-            # TODO: wtf the matrix O how?? A,C are time-varying
-            for i in range(1, N):       # block row
-                for j in range(1, i+1): # block col (only lower-triangular part)
-                    # iterate T-N+1...T-1
-                    A, _, _, C = self.model.linearize(self.xvec[-N+i-j], useq_raw[-N+i-j])  # TODO: no fcking idea what i'm doing
-                    A = np.eye(self.Nx) + A*self.ts
-                    O[i*self.Ny:(i+1)*self.Ny, j*self.Nx:(j+1)*self.Nx] = C @ np.linalg.matrix_power(A, i-j)
-            W = np.kron(np.eye(N), self.R) + O @ np.kron(np.eye(N), self.Q) @ O.T   # shape: (N*Ny, N*Ny)
-            try:    W_inv = np.linalg.inv(W)
-            except: W_inv = np.linalg.pinv(W)
-            # W_inv = np.eye(self.Ny*N)*0.
-            
-            # See Rao 2001
-            O = np.zeros((self.Ny*N, self.Nx))
-            for k in range(N):  # iterate T-N...T-1
-                A, _, _, C = self.model.linearize(self.xvec[-N+k], useq_raw[-N+k])
-                A = np.eye(self.Nx) + A*self.ts
-                O[k*self.Ny : (k+1)*self.Ny, :] = C @ np.linalg.matrix_power(A, k)
-
-        # %% ========================================================================================================= #
-        #                                               LINEARIZATION
-        # ============================================================================================================ #
-        if self.mhe_type == "linearized_once":
-            X0 = X0 - self.xs
-            y = yseq_raw - self.C @ self.xs
-            u = useq_raw - self.us
-
-        elif self.mhe_type == "linearized_every":
-            # Use nonlinear model to get nominal trajectory
-            xnom = np.zeros((N+1, self.Nx))     # x(T-N)...x(T)
-            xnom[0] = X0
-            for k in range(N):
-                xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k])*self.ts
-                
-            X0 = np.zeros(self.Nx)
-            y = yseq_raw - xnom @ self.C.T
-            u = np.zeros((N, self.Nu))
-
-        elif self.mhe_type == "nonlinear":
-            # X0 = X0
-            y = yseq_raw
-            u = useq_raw
 
         # %% ========================================================================================================= #
         #                                       OPTIMIZATION - LINEAR MHE (CVXPY/PCIP)
-        #                       (Smoothing scheme: no arrival cost update since it is non-convex)
         # ============================================================================================================ #
         if self.mhe_type in ["linearized_once", "linearized_every"]:
 
@@ -230,52 +231,13 @@ class MHE():
             else:
                 P0_inv = np.linalg.inv(P0)
             H, f = build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq[:-1], Rinv_seq,
-                                X0, P0_inv, u, y)
+                                X0, P0_inv, u, y,
+                                smoothing_adjustment=(self.mhe_update=="smoothing"),
+                                Q_seq=Q_seq,
+                                R_seq=R_seq)
             
             if self.solver is None:
-                '''
-                # Variables
-                x = cp.Variable((N+1, self.Nx))         # state
-                if N>0: w = cp.Variable((N, self.Nx))   # process noise
-
-                # Calculate cost from T-N to T-1 (N steps)
-                # Arrival cost - adjusted for smoothing scheme
-                if self.prior_method == "zero":
-                    cost = 0.0
-                else:
-                    cost = .5*cp.quad_form(x[0] - X0, np.linalg.inv(P0))
-                if self.mhe_update == "smoothing" and N > 1:
-                    yflat = y[:-1].flatten()            # y(T-N)...y(T-1)
-                    # cost -= .5*cp.quad_form(yflat - O@x[0], W_inv)  # TODO: nonconvex problem!!
-                constraints = []
-                if self.mhe_type == "linearized_once":      x_cons = self.model.stateConstraint(x[0] + self.xs)
-                elif self.mhe_type == "linearized_every":   x_cons = self.model.stateConstraint(x[0] + xnom[0])
-                if x_cons is not None:
-                    constraints.append(x_cons)
-                
-                # Running cost
-                for k in range(N):
-                    if self.mhe_type == "linearized_every":   # Linearize around nominal trajectory
-                        A, B, G, C = self.model.linearize(xnom[k], useq_raw[k])
-                        self.updateModel(A, B, G, C)
-                    cost += .5*cp.quad_form(w[k], self.Q_inv) + .5*cp.quad_form(y[k] - self.C@x[k], self.R_inv)
-                    constraints.append(x[k+1] == self.A@x[k] + self.B@u[k] + self.G@w[k])
-                    if self.mhe_type == "linearized_once":      x_cons = self.model.stateConstraint(x[k+1] + self.xs)
-                    elif self.mhe_type == "linearized_every":   x_cons = self.model.stateConstraint(x[k+1] + xnom[k+1])
-                    if x_cons is not None:
-                        constraints.append(x_cons)
-                
-                # Calculate cost at time T
-                if self.mhe_type == "linearized_every":
-                    A, B, G, C = self.model.linearize(xnom[-1], np.zeros(self.Nu))   # only use C=dh(x)/dx so u doesn't matter
-                    self.updateModel(A, B, G, C)
-                cost += .5*cp.quad_form(y[-1] - self.C@x[-1], self.R_inv)
-                '''
-                # ========================================================= #
-                # quadratic programming: V = 1/2 z'Hz + f'z
-                # constraint: A_eq z = b_eq
-                # ========================================================= #
-                """
+                """ # Dynamics as equality constraints
                 H, f, A_eq, b_eq = build_mhe_qp_with_dyn_constraints(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
                                                                      X0, P0_inv, u, y)
 
@@ -289,12 +251,11 @@ class MHE():
                 z = cp.Variable(((N+1)*self.Nx,))
                 constraints = []
                 cost = 0.5 * cp.quad_form(z, cp.psd_wrap(H)) + f @ z
-                
-                # ========================================================= #
 
                 prob = cp.Problem(cp.Minimize(cost), constraints)
                 # prob.solve(solver=cp.OSQP, warm_start=True)
                 # prob.solve(solver=cp.ECOS, feastol=1e-04, reltol=1e-6, abstol=1e-3, verbose=True)
+                # prob.solve(solver=cp.CLARABEL)
                 try:
                     # prob.solve()
                     prob.solve(solver=cp.OSQP, eps_abs=1e-6, eps_rel=1e-6, max_iter=100)
@@ -305,10 +266,8 @@ class MHE():
                 # xvec = z.value[0:(N+1)*self.Nx].reshape((N+1, self.Nx))
                 z = z.value
             
-            # ========================================================= #
-            # ========================================================= #
-            elif self.solver == "pcip": # only dynamics constraints!!
-                """
+            elif self.solver in ["pcip", "pcip_l1ao"]: # only dynamics constraints!!
+                """ # Dynamics as equality constraints
                 # Lagrange multiplier v, length: N*Nx
                 # z = [x(0),..., x(N), w(0),..., w(N-1), v], length: (3N+1)*Nx
                 H, f, A_eq, b_eq = build_mhe_qp_with_dyn_constraints(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
@@ -337,56 +296,56 @@ class MHE():
                 """
                 # z = [x(0), w(0), ..., w(N-1)]
                 # Initialize z0
-                if not hasattr(self, 'pcip_z0'):    # T=0: initialize z=0
-                    z0 = np.zeros((self.Nx,))
-                elif self.pcip_z0.shape[0] < (N+1)*self.Nx: # horizon still growing
-                    z0 = np.hstack((self.pcip_z0, self.pcip_z0[-self.Nx : ]))
-                else:   # full horizon reached - size of z fixed
-                    z0 = self.pcip_z0
+                if not hasattr(self, 'tvopt_z0'):    # T=0: initialize z=0
+                    z0    = np.zeros((self.Nx,))
+                    zdot0 = np.zeros((self.Nx,))
+                    if self.solver == "pcip_l1ao":
+                        za_dot0       = np.zeros((self.Nx,))
+                        grad_phi_hat0 = np.zeros((self.Nx,))
 
-                # solve QP with PCIP
+                elif self.tvopt_z0.shape[0] < (N+1)*self.Nx: # horizon still growing
+                    z0    = np.hstack((self.tvopt_z0, self.tvopt_z0[-self.Nx : ]))
+                    zdot0 = np.hstack((self.tvopt_zdot0, self.tvopt_zdot0[-self.Nx : ]))
+                    if self.solver == "pcip_l1ao":
+                        za_dot0       = np.hstack((self.l1ao_za_dot0, self.l1ao_za_dot0[-self.Nx : ]))
+                        grad_phi_hat0 = np.hstack((self.l1ao_grad_phi_hat0, self.l1ao_grad_phi_hat0[-self.Nx : ]))
+
+                else:   # full horizon reached - size of z fixed
+                    z0    = self.tvopt_z0
+                    zdot0 = self.tvopt_zdot0
+                    if self.solver == "pcip_l1ao":
+                        za_dot0       = self.l1ao_za_dot0
+                        grad_phi_hat0 = self.l1ao_grad_phi_hat0
+
+                # Solve QP with PCIP / PCIP+L1AO
                 self.pcip.set_QP(H, f)
-                _, z = self.pcip.dynamics(z0)
-                self.pcip_z0 = z
+                zb_dot, zb = self.pcip.dynamics(z0)
+
+                if self.solver == "pcip_l1ao":
+                    self.l1ao.set_QP(H, f)
+                    # za_dot, grad_phi_hat, z = self.l1ao.dynamics(z0, za_dot0, grad_phi_hat0, zb_dot)
+                    za_dot, grad_phi_hat, z, zdot = self.l1ao.dynamics(z0, zdot0, za_dot0, grad_phi_hat0, zb_dot)
+
+                    # Save for next time step (only L1AO): za_dot(T), grad_phi_hat(T+1)
+                    self.l1ao_za_dot0 = za_dot
+                    self.l1ao_grad_phi_hat0 = grad_phi_hat
+                else:
+                    z, zdot = zb, zb_dot
                 
-            elif self.solver == "pcip_l1ao":
-                # z = [x(0), w(0), ..., w(N-1)]
-                # Initialize z0
-                if not hasattr(self, 'pcip_z0'):    # T=0: initialize z=0
-                    z0 = np.zeros((self.Nx,))
-                    za_dot0 = np.zeros((self.Nx,))
-                    grad_phi_hat0 = np.zeros((self.Nx,))
-                elif self.pcip_z0.shape[0] < (N+1)*self.Nx: # horizon still growing
-                    z0 = np.hstack((self.pcip_z0, self.pcip_z0[-self.Nx : ]))
-                    za_dot0 = np.hstack((self.l1ao_za_dot0, self.l1ao_za_dot0[-self.Nx : ]))
-                    grad_phi_hat0 = np.hstack((self.l1ao_grad_phi_hat0, self.l1ao_grad_phi_hat0[-self.Nx : ]))
-                else:   # full horizon reached - size of z fixed
-                    z0 = self.pcip_z0
-                    za_dot0 = self.l1ao_za_dot0
-                    grad_phi_hat0 = self.l1ao_grad_phi_hat0
-
-                # solve QP with PCIP
-                self.pcip.set_QP(H, f)
-                self.l1ao.set_QP(H, f)
-                zb_dot, _ = self.pcip.dynamics(z0)
-                za_dot, grad_phi_hat, z = self.l1ao.dynamics(z0, za_dot0, grad_phi_hat0, zb_dot)
-
-                # Save for next time step
-                self.pcip_z0 = z
-                self.l1ao_za_dot0 = za_dot
-                self.l1ao_grad_phi_hat0 = grad_phi_hat
+                # Save for next time step: z(T+1), zdot(T)
+                self.tvopt_z0 = z
+                self.tvopt_zdot0 = zdot
             
-            # ========================================================= #
-            # Result for linearized MHE
-            # ========================================================= #
+            # Result for linear MHE
+            # if z is None:   # CVXPY failed
+            #     xvec = xnom.copy()
+            # else:
             xvec = self.construct_X_from_X0(z[:self.Nx], A_seq, B_seq, G_seq,
                                             z[self.Nx:].reshape((N,self.Nx)), u)
             if self.mhe_type == "linearized_once":
-                # xvec = x.value + self.xs   # x(T-N)...x(T)
-                xvec = xvec + self.xs
+                xvec = xvec + self.xs   # x(T-N)...x(T)
             elif self.mhe_type == "linearized_every":
-                # xvec = x.value + xnom      # x(T-N)...x(T)
-                xvec = xvec + xnom
+                xvec = xvec + xnom      # x(T-N)...x(T)
 
         # %% ========================================================================================================= #
         #                                   OPTIMIZATION - NONLINEAR MHE (scipy.optimize)
@@ -401,6 +360,7 @@ class MHE():
                     cost = 0.0
                 else:
                     cost = .5 * (x0 - X0).T @ np.linalg.inv(P0) @ (x0 - X0)
+                """
                 if self.mhe_update == "smoothing" and N > 1:
                     # a_random_matrix = np.zeros((self.Ny*N, self.Nu*N))
                     # for r in range(N):
@@ -414,7 +374,7 @@ class MHE():
                     yflat = y[:-1].flatten()    # y(T-N)...y(T-1)
                     temp = yflat - O@x0
                     cost -= .5 * temp.T @ W_inv @ temp
-
+                """
                 # Running cost
                 for k in range(N):
                     y_pred = self.model.getOutput(x0)
@@ -448,13 +408,12 @@ class MHE():
         # self.xvec:    x(T-N-1)...x(T-1)
         #      xvec:    x(T-N)...x(T)
         if self.mhe_update == "filtering":
-            # if T > 0:
+            if T > 0:
                 # Only save the latest estimate x(T|T)
                 self.xvec = np.concatenate((self.xvec, xvec[-1].reshape(1, self.Nx)), axis=0)
-                if np.size(self.xvec, 0) > self.N+1:
-                    self.xvec = self.xvec[-self.N-1:]
-            # else:
-            #     self.xvec = xvec    # only 1 value, override initial guess X0
+                self.xvec = self.xvec[-self.N-1:]
+            else:
+                self.xvec = xvec    # only 1 value, override initial guess X0
         elif self.mhe_update in ["smoothing", "smoothing_naive"]:    # always override even at T=0,1 - trust me bro
             # Save the entire horizon of latest estimate x(T-N|T)...x(T|T)
             self.xvec = xvec
@@ -473,15 +432,16 @@ class MHE():
             Q_k = np.linalg.inv(Qinv_seq[-1])
             L = P0 @ self.C.T @ np.linalg.inv(R_k + self.C @ P0 @ self.C.T)
             P = P0 - L @ self.C @ P0    # P(T|T)
-            self.Pvec1 = np.concatenate((self.Pvec1, P.reshape((1, self.Nx, self.Nx))), axis=0)
-            if np.size(self.Pvec1, 0) > self.N+1:
+            if T > 0:
+                self.Pvec1 = np.concatenate((self.Pvec1, P.reshape((1, self.Nx, self.Nx))), axis=0)
                 self.Pvec1 = self.Pvec1[-self.N-1:]
+            else:
+                self.Pvec1[0] = P
 
             # Calculate P(T+1|T) from P(T|T)
             P = self.G @ Q_k @ self.G.T + self.A @ P @ self.A.T  # P(T+1|T)
             self.Pvec = np.concatenate((self.Pvec, P.reshape((1, self.Nx, self.Nx))), axis=0)
-            if np.size(self.Pvec, 0) > self.N+1:
-                self.Pvec = self.Pvec[-self.N-1:]
+            self.Pvec = self.Pvec[-self.N-1:]
 
         # %% ========================================================================================================= #
         #                                                    DONE
