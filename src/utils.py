@@ -65,17 +65,13 @@ def build_mhe_qp_with_dyn_constraints_lagrangian(H, f, A_eq, b_eq):
     H = np.block([[H, A_eq.T],
                   [A_eq, np.zeros((v_len, v_len))]])
     f = np.hstack([f, -b_eq])
-
-    # Optional simple box constraints on states to demonstrate inequalities:
-    # e.g., |x_j| <= xmax for all stacked states
-    # xmax = 1e3
-    # G = np.vstack([ np.eye((N+1)*n), -np.eye((N+1)*n) ])
-    # h = np.hstack([ xmax*np.ones((N+1)*n), xmax*np.ones((N+1)*n) ])
-    # G, h = None, None
-
     return H, f
 
-def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq, Rinv_seq, x_prior, P_prior_inv, u_seq, y_seq):
+def build_mhe_qp(
+        A_seq, B_seq, G_seq, C_seq, Qinv_seq, Rinv_seq,
+        x_prior, P_prior_inv, u_seq, y_seq,
+        smoothing_adjustment=False, Q_seq=None, R_seq=None
+    ):
     """
     Linear QP with dynamics incorporated into the objective (no constraints).
     Optimization variable: z = [x(0), w(0), ..., w(N-1)]
@@ -90,6 +86,8 @@ def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq, Rinv_seq, x_prior, P_prio
         Rinv_seq = [R(0)^{-1}, ..., R(N)^{-1}]
         u_seq = [u(0), ..., u(N-1)]
         y_seq = [y(0), ..., y(N)]
+        Q_seq = [Q(0), ..., Q(N)]   (only used by smoothing MHE)
+        R_seq = [R(0), ..., R(N)]   (only used by smoothing MHE)
     """
     N = len(A_seq)
     nx = x_prior.shape[0]
@@ -117,6 +115,19 @@ def build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq, Rinv_seq, x_prior, P_prio
     f = AT_CT_R @ (matC @ matb - y_seq.flatten())
     H[0:nx, 0:nx] += P_prior_inv
     f[0:nx]       += -P_prior_inv @ x_prior
+
+    if smoothing_adjustment and N>0:
+        Ax = np.concatenate([matA[:, :nx], np.zeros(((N+1)*nx, N*nx))], axis=1)
+        Aw = np.concatenate([np.zeros(((N+1)*nx, nx)), matA[:, nx:]], axis=1)
+        Q = block_diag(*Q_seq)  # last element can be 0 or Q(N), doesn't matter
+        R = block_diag(*R_seq[:N])
+        ybar = y_seq[:N]
+        Cbar = np.concatenate([block_diag(*C_seq[:N]), np.zeros((N*ny, nx))], axis=1)
+        W = Cbar @ Aw @ Q @ Aw.T @ Cbar.T + R
+        W_inv = np.linalg.inv(W)
+        AT_CT_W = Ax.T @ Cbar.T @ W_inv
+        H += - AT_CT_W @ Cbar @ Ax
+        f += - AT_CT_W @ (Cbar @ matb - ybar.flatten())
 
     return H, f
 

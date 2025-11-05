@@ -3,6 +3,9 @@ from math import sin, cos, tan, sqrt, atan2
 import matplotlib.pyplot as plt
 from .basic import DynamicalSystem
 
+def saturate(val, lower_bound, upper_bound):
+    return max(lower_bound, min(upper_bound, val))
+
 class Quadrotor1(DynamicalSystem):
 
     """
@@ -96,11 +99,8 @@ class Quadrotor1(DynamicalSystem):
         if len(u) != self.Nu:
             raise Exception("Invalid number of control inputs: " + str(len(u)))
         for i in range(self.Nu):
-            u[i] = self.saturate(u[i], self.umin, self.umax)
+            u[i] = saturate(u[i], self.umin, self.umax)
         return u
-
-    def saturate(self, val, lower_bound, upper_bound):
-        return max(lower_bound, min(upper_bound, val))
     
     def gravityCompensation(self, x):
         roll, pitch = x[6], x[7]
@@ -307,5 +307,216 @@ class Quadrotor1(DynamicalSystem):
         matB[15, 3] = (self.kf[1] + 2*self.kf[2]*u4)/self.tc
         
         return matA, matB, self.G, self.C
+
+
+class Quadrotor2(DynamicalSystem):
+    """
+    12-dimensional quadrotor model:
+        x = [X, Y, Z, Xd, Yd, Zd, phi(roll), theta(pitch), psi(yaw), p, q, r]
+        u = [T, tau_x, tau_y, tau_z]
+        y = output vector [X(gps_x), Y(gps_Y), Z(gps_Z), p(gyro_x), q(gyro_y), r(gyro_z)]
+    Ignore drag 1/m*(-D*[Xd;Yd;Zd]) and accelerometer readings (which measure body accelerations).
+    Linearized form:
+        xdot = Ax + Bu + Gw
+        y    = Cx + v
+    If we use accelerometer, y_gyro = 1/m*([0;0;T] - R^T*D*[Xd;Yd;Zd]) - output depends on u.
+    Linearized form: y = Cx + Du + v - destroy MHE structure we're using. Should be future work.
+    """
+
+    def __init__(
+            self,
+            m=1.0,
+            g=9.81,
+            J=np.diag([0.005, 0.005, 0.009])
+        ):
+        self.m = m        # mass (kg)
+        self.g = g        # gravity (m/s^2)
+        self.J = J        # inertia matrix (3×3)
+        self.J_inv = np.linalg.inv(J)
+
+        # Model dimensions
+        self.Nx = 12
+        self.Nu = 4
+        self.Ny = 6
+
+        self.G = np.eye(self.Nx)
+        self.C = np.zeros((self.Ny, self.Nx))
+        self.C[0,0] = 1.
+        self.C[1,1] = 1.
+        self.C[2,2] = 1.
+        self.C[3,9] = 1.
+        self.C[4,10] = 1.
+        self.C[5,11] = 1.
+        # self.C[3,6] = 1.
+        # self.C[4,7] = 1.
+        # self.C[5,8] = 1.
+        # self.C[6,9] = 1.
+        # self.C[7,10] = 1.
+        # self.C[8,11] = 1.
     
+    def stateConstraint(self, x):
+        return None
+    
+    def getOutput(self, x, v=None):
+        """
+        Measurement model: y(k) = h(x(k),v(k)) = C x(k) + v(k)
+        Sensors:
+            GPS: position (X,Y,Z)
+            IMU: gyroscope (p,q,r), skip accelerometer
+        """
+        if v is None:
+            v = np.zeros(self.Ny)
+        return self.C @ x + v
+    
+    def saturateControl(self, u):
+        u_sat = u.copy()
+        # u_sat[0] = saturate(u_sat[0], 0., 50.)
+        # u_sat[1] = saturate(u_sat[1], -2., 2.)
+        # u_sat[2] = saturate(u_sat[2], -2., 2.)
+        # u_sat[3] = saturate(u_sat[3], -2., 2.)
+        return u_sat
+
+    # ----------------------------------------------------
+    # Rotation matrices and helper functions
+    # ----------------------------------------------------
+    def R(self, phi, theta, psi):
+        """
+        Rotation matrix body-to-world using ZYX (yaw-pitch-roll) convention.
+        """
+        cphi, sphi = cos(phi), sin(phi)
+        cth, sth   = cos(theta), sin(theta)
+        cpsi, spsi = cos(psi), sin(psi)
+        R = np.array([
+            [cpsi*cth, cpsi*sth*sphi - spsi*cphi, cpsi*sth*cphi + spsi*sphi],
+            [spsi*cth, spsi*sth*sphi + cpsi*cphi, spsi*sth*cphi - cpsi*sphi],
+            [-sth,     cth*sphi,                  cth*cphi]
+        ])
+        return R
+
+    def W(self, phi, theta):
+        """
+        Euler-angle rate transformation matrix.
+        """
+        cphi, sphi = cos(phi), sin(phi)
+        cth, sth   = cos(theta), sin(theta)
+        tth        = tan(theta)
+        W = np.array([
+            [1, sphi*tth, cphi*tth],
+            [0, cphi, -sphi],
+            [0, sphi/cth, cphi/cth]
+        ])
+        return W
+
+    # ----------------------------------------------------
+    # 1. Dynamics
+    # ----------------------------------------------------
+    def dx(self, x, u, w=None):
+        """
+        Compute continuous-time dynamics xdot = f(x,u,w).
+        w: process noise
+        """
+        if w is None:
+            w = np.zeros(self.Nx)
+
+        # State unpacking
+        X, Y, Z, Xd, Yd, Zd, phi, theta, psi, p, q, r = x
+        T, tau_x, tau_y, tau_z = u
+
+        # Rotation matrix
+        R = self.R(phi, theta, psi)
+        W = self.W(phi, theta)
+
+        # Translational dynamics (world frame)
+        acc = (1/self.m) * (R @ np.array([0, 0, T])) - np.array([0, 0, self.g])
+
+        # Angular velocity derivatives (body frame)
+        omega = np.array([p, q, r])
+        tau = np.array([tau_x, tau_y, tau_z])
+        omega_dot = self.J_inv @ (tau - np.cross(omega, self.J @ omega))
+
+        # Euler angle rates
+        euler_dot = W @ omega
+
+        # Assemble xdot
+        xdot = np.hstack([
+            [Xd, Yd, Zd],        # position rates
+            acc,                 # accelerations
+            euler_dot,           # roll, pitch, yaw rates
+            omega_dot            # angular rates
+        ]) + w
+
+        return xdot
+
+    # ----------------------------------------------------
+    # 2. Linearization (A,B,G,C matrices)
+    # ----------------------------------------------------
+    def linearize(self, x, u):
+
+        # State unpacking
+        X, Y, Z, Xd, Yd, Zd, phi, theta, psi, p, q, r = x
+        T, tau_x, tau_y, tau_z = u
+
+        cphi, sphi = cos(phi), sin(phi)
+        cth, sth   = cos(theta), sin(theta)
+        cpsi, spsi = cos(psi), sin(psi)
+        tan_th     = tan(theta)
+        sec_th     = 1. / cos(theta)
+
+        matA = np.zeros((self.Nx, self.Nx))
+        matB = np.zeros((self.Nx, self.Nu))
+
+        # Position kinematics
+        matA[0, 3] = 1.
+        matA[1, 4] = 1.
+        matA[2, 5] = 1.
+
+        # Translational dynamics (partial wrt orientation)
+        matA[3, 6] = (T*(cphi*spsi - cpsi*sphi*sth)) / self.m
+        matA[3, 7] = (T*cphi*cpsi*cth) / self.m
+        matA[3, 8] = (T*(cpsi*sphi - cphi*spsi*sth)) / self.m
+
+        matA[4, 6] = -(T*(cphi*cpsi + sphi*spsi*sth)) / self.m
+        matA[4, 7] = (T*cphi*cth*spsi) / self.m
+        matA[4, 8] = (T*(sphi*spsi + cphi*cpsi*sth)) / self.m
+
+        matA[5, 6] = -(T*cth*sphi) / self.m
+        matA[5, 7] = -(T*cphi*sth) / self.m
+
+        # Euler angle rates
+        matA[6, 6] = (q*cphi - r*sphi)*tan_th
+        matA[6, 7] = (r*cphi + q*sphi)*(tan_th**2 + 1)
+        matA[6, 9] = 1.
+        matA[6,10] = sphi*tan_th
+        matA[6,11] = cphi*tan_th
+
+        matA[7, 6] = -r*cphi - q*sphi
+        matA[7,10] = cphi
+        matA[7,11] = -sphi
+
+        matA[8, 6] = (q*cphi - r*sphi)*sec_th
+        matA[8, 7] = (r*cphi + q*sphi)*sth*sec_th**2
+        matA[8,10] = sphi*sec_th
+        matA[8,11] = cphi*sec_th
+
+        # Angular rate dynamics
+        matA[9,10] = r*(self.J[1,1] - self.J[2,2]) / self.J[0,0]
+        matA[9,11] = q*(self.J[1,1] - self.J[2,2]) / self.J[0,0]
+
+        matA[10,9] = -r*(self.J[0,0] - self.J[2,2]) / self.J[1,1]
+        matA[10,11] = -p*(self.J[0,0] - self.J[2,2]) / self.J[1,1]
+
+        matA[11,9] = q*(self.J[0,0] - self.J[1,1]) / self.J[2,2]
+        matA[11,10] = p*(self.J[0,0] - self.J[1,1]) / self.J[2,2]
+
+        # Matrix B
+        matB[3,0] = (sphi*spsi + cphi*cpsi*sth) / self.m
+        matB[4,0] = -(cpsi*sphi - cphi*spsi*sth) / self.m
+        matB[5,0] = (cphi*cth) / self.m
+
+        matB[9,1] = 1. / self.J[0,0]
+        matB[10,2] = 1. / self.J[1,1]
+        matB[11,3] = 1. / self.J[2,2]
+
+        return matA, matB, self.G, self.C
+
     

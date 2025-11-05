@@ -80,6 +80,7 @@ def main(
         use_QR_guess = False
         if Q is None:   Q = np.diag(w_stds**2)
         if R is None:   R = np.diag(v_stds**2)
+    print("\n")
     print("=================== Simulation settings ===================")
     print(f"Simulation time    : {T:.1f} s")
     print(f"Sampling period    : {ts/1e-3:.1f} ms")
@@ -115,8 +116,6 @@ def main(
             SKF = KF(
                 model = drone_est,
                 ts = sim.get_time_step(),
-                Q = Q,
-                R = R,
                 P0 = P0,
                 type = "standard",
                 xs = xhover_est,
@@ -126,8 +125,6 @@ def main(
             EKF = KF(
                 model = drone_est,
                 ts = sim.get_time_step(),
-                Q = Q,
-                R = R,
                 P0 = P0,
                 type = "extended"
             )
@@ -135,8 +132,6 @@ def main(
             LMHE_cvxpy = MHE(
                 model = drone_est,
                 ts = sim.get_time_step(),
-                Q = Q,
-                R = R,
                 N = mhe_horizon,
                 X0 = xhover_est,
                 P0 = P0,
@@ -151,8 +146,6 @@ def main(
             LMHE_pcip = MHE(
                 model = drone_est,
                 ts = sim.get_time_step(),
-                Q = Q,
-                R = R,
                 N = mhe_horizon,
                 X0 = xhover_est,
                 P0 = P0,
@@ -167,8 +160,6 @@ def main(
             LMHE_pcip_l1ao = MHE(
                 model = drone_est,
                 ts = sim.get_time_step(),
-                Q = Q,
-                R = R,
                 N = mhe_horizon,
                 X0 = xhover_est,
                 P0 = P0,
@@ -183,8 +174,6 @@ def main(
             NMHE = MHE(
                 model = drone_est,
                 ts = sim.get_time_step(),
-                Q = Q,
-                R = R,
                 N = mhe_horizon,
                 X0 = xhover_est,
                 P0 = P0,
@@ -260,6 +249,7 @@ def main(
         np.save(f, yvec)
         np.save(f, uvec)
     print("Simulation data saved to 'sim_data.npy'")
+    print("\n")
 
     # ----------------------- Plot results -----------------------
     if enable_plot:
@@ -391,7 +381,8 @@ def main(
             if 'LMHE3' in enabled_estimators:   plt.plot(tvec, err_lmhe3, color='tab:green', ls='-', lw=1.5, label='LMHE3')
             plt.grid()
             plt.ylabel(r'$\|x - \hat{x}\|$', fontsize=10)
-            plt.legend()
+            leg = plt.legend()
+            leg.set_draggable(True)
 
             plt.subplot(212)
             plt.axhline(0.0, color='tab:red', linestyle='--', linewidth=2.)
@@ -401,16 +392,21 @@ def main(
             plt.grid()
             plt.xlabel('Time (s)')
             plt.ylabel('LMHE - EKF')
-            plt.legend()
+            leg = plt.legend()
+            leg.set_draggable(True)
 
         plt.show()
 
 
 if __name__ == "__main__":
     """
-    Estimators to simulate: 'KF', 'EKF',
-                            'LMHE1' (linearized once),'LMHE2' (linearized every step),
-                            'NMHE' (using nonlinear dynamics)
+    Working estimators: "KF", "EKF",
+                        "LMHE1" (CVXPY OSQP/ECOS),
+                        "LMHE2" (PCIP),
+                        "LMHE3" (PCIP+L1AO)
+    Working MHE update schemes: "filtering" (equivalent to the EKF),
+                                "smoothing_naive" (better than EKF if parameters are bad)
+    Might need to retune (Q, R, PCIP, L1AO) for different schemes.
     """
     main(
         enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
@@ -430,7 +426,7 @@ if __name__ == "__main__":
         R=np.diag([.01]*9),   # lower Q means trust model more than measurements (so MHE can do better, EKF worse)
         T=5.,
         # ts=0.001,
-        loops=5,
+        # loops=5,
         # mhe_horizon  = 30,
         mhe_update   = "smoothing_naive",     # "filtering" (default), "smoothing", or "smoothing_naive"
         prior_method = "ekf",           # "zero", "uniform", "ekf" (default)

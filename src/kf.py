@@ -3,7 +3,7 @@ import numpy as np
 
 class KF():
 
-    def __init__(self, model, ts, Q, R, P0=None, type="standard", xs=None, us=None):
+    def __init__(self, model, ts, P0=None, type="standard", xs=None, us=None):
         """
         Args:
             model: dynamical model object
@@ -19,8 +19,6 @@ class KF():
         self.Nu = model.Nu  # inputs
         self.Ny = model.Ny  # outputs
         self.ts = ts        # sampling time
-        self.Q = Q      # process noise covariance
-        self.R = R      # measurement noise covariance
         if P0 is not None:
             self.P0 = P0    # covariance of x0hat before measurement
             self.P = P0     # covariance of x0hat after measurement
@@ -36,7 +34,9 @@ class KF():
 
     def update_covariance(self, Q, R):
         """
-        In case of time-varying Q, R matrices.
+        Args:
+            Q: process noise (disturbance) covariance
+            R: measurement noise covariance
         """
         self.Q = Q
         self.R = R
