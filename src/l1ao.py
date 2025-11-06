@@ -13,6 +13,7 @@ class L1AOQP():
 
         # As: diagonal Hurwitz matrix (assume As = diag([a, a, ..., a]), a<0)
         self.a = a
+        self.u = self.a / (np.exp(-self.a*self.ts) - 1.)
         self.dim = 0
 
         # Low-pass filter
@@ -25,7 +26,7 @@ class L1AOQP():
         For the MHE problem: dim is continuously growing until it reaches the horizon length
         """
         self.As = np.diag([self.a]*dim)
-        self.mu = np.diag([self.a / (np.exp(-self.a*self.ts) - 1.)]*dim)
+        self.mu = np.diag([self.u]*dim)
         self.dim = dim
 
     def lpf(self, x0, u):
@@ -86,7 +87,7 @@ class L1AOQP():
             grad_zt = np.zeros_like(z0)
 
         # L1AO
-        e = grad_phi_hat0 - grad_phi0    # e(T)
+        e = grad_phi_hat0 - grad_phi0    # e(T). (grad_phi_hat0 - grad_phi) gives worse result
         h = self.mu @ e                 # h(T)
         sigma_hat = np.linalg.solve(hess_phi, h)   # sigma_hat(T)
         za_dot = self.lpf(za_dot0, -sigma_hat)  # za_dot(T)
