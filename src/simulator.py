@@ -25,6 +25,7 @@ class Simulator():
             w_stds,
             v_means,
             v_stds,
+            x0_stds,
             T=5.0,
             ts=0.01,
             noise_distribution="gaussian",
@@ -50,6 +51,7 @@ class Simulator():
         self.w_stds     = w_stds
         self.v_means    = v_means
         self.v_stds     = v_stds
+        self.x0_stds    = x0_stds
         self.noise_distribution = noise_distribution
         self.time_varying_measurement_noise = time_varying_measurement_noise
         self.use_QR_guess   = use_QR_guess
@@ -111,11 +113,21 @@ class Simulator():
         return max(lower_bound, min(upper_bound, val))
 
 
-    def simulate_quadrotor_lqr_control(self, traj_mode="p2p", x0=None, xref=None, zero_disturbance=False, zero_noise=False):
+    def simulate_quadrotor_lqr_control(
+            self,   # for reproducible noise generation
+            seed,
+            traj_mode="p2p",
+            x0=None,
+            xref=None,
+            zero_disturbance=False,
+            zero_noise=False,
+            measurement_delay=0
+        ):
         """
         traj_mode: "p2p" (point-to-point)
                    "circle" (circular trajectory)
         """
+        rng = np.random.default_rng(seed)
         # ----------------------- Initial & ref states -----------------------
         if self.mode != 'quadrotor':
             return
@@ -154,8 +166,9 @@ class Simulator():
                 elif type(self.sys).__name__ == 'Quadrotor2':
                     radius = 0.3    # m
                     omega = 5.    # rad/s
-                    vz = .1        # m/s
+                    # vz = .1        # m/s
                     z0 = 1.
+                    dz = .1
                     x0 = np.array([radius, 0., z0, 0., 0., 0., 0., 0., 0., 0., 0., 0.])
                     xref = np.array([0., 0., z0, 0., 0., 0., 0., 0., 0., 0., 0., 0.])
             elif traj_mode == "triangle":
@@ -220,8 +233,12 @@ class Simulator():
         if zero_disturbance:
             wvec = np.zeros((self.N, self.Nx))
         else:
-            # if self.noise_distribution=="gaussian":  wvec = np.random.normal(loc=self.w_means, scale=self.w_stds)   # size=(self.N, self.Nx)
-            # elif self.noise_distribution=="uniform": wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3)   # size=(self.N, self.Nx)
+            # if self.noise_distribution=="gaussian":
+            #     # wvec = np.random.normal(loc=self.w_means, scale=self.w_stds)   # size=(self.N, self.Nx)
+            #     wvec = rng.normal(loc=self.w_means, scale=self.w_stds)
+            # elif self.noise_distribution=="uniform":
+            #     # wvec = np.random.uniform(low=-self.w_stds*3, high=self.w_stds*3)   # size=(self.N, self.Nx)
+            #     wvec = rng.uniform(low=-self.w_stds*3, high=self.w_stds*3)
             if type(self.sys).__name__ == 'Quadrotor1':
                 w_omega = np.array([ 0., np.pi, 0., 1.7*np.pi, 0., 2.4*np.pi,     # external forces acting on Xdd, Ydd, Zdd
                                     0., 0., 0.,
@@ -242,11 +259,16 @@ class Simulator():
         if zero_noise:
             vvec = np.zeros((self.N, self.Ny))
         else:
-            if self.noise_distribution=="gaussian":  vvec = np.random.normal(loc=self.v_means, scale=self.v_stds)   # size=(self.N, self.Ny)
-            elif self.noise_distribution=="uniform": vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3)   # size=(self.N, self.Ny)
+            if self.noise_distribution=="gaussian":
+                # vvec = np.random.normal(loc=self.v_means, scale=self.v_stds)   # size=(self.N, self.Ny)
+                vvec = rng.normal(loc=self.v_means, scale=self.v_stds)
+            elif self.noise_distribution=="uniform":
+                # vvec = np.random.uniform(low=-self.v_stds*3, high=self.v_stds*3)   # size=(self.N, self.Ny)
+                vvec = rng.uniform(low=-self.v_stds*3, high=self.v_stds*3)
 
         wp_idx = 0
         timer = 0.
+        X0 = x0.copy()
         for i in range(self.N):
             # if i % 126 == 0:
             #     vvec[i] = vvec[i]*10.   # introduce outliers
@@ -264,10 +286,12 @@ class Simulator():
                     # omega = min(omega, 5.)
                     xref[0] = radius * cos(omega*self.tvec[i])
                     xref[1] = radius * sin(omega*self.tvec[i])
-                    xref[2] = z0 + vz * self.tvec[i]
+                    # xref[2] = z0 + vz * self.tvec[i]
+                    xref[2] = z0 + dz * sin(omega*self.tvec[i])
                     xref[3] = -radius * omega * sin(omega*self.tvec[i])
                     xref[4] = radius * omega * cos(omega*self.tvec[i])
-                    xref[5] = vz
+                    # xref[5] = vz
+                    xref[5] = dz * omega * cos(omega*self.tvec[i])
             elif traj_mode=="triangle":
                 if type(self.sys).__name__ == 'Quadrotor1':
                     pass
@@ -282,7 +306,10 @@ class Simulator():
                         wp_idx = (wp_idx + 1) % waypoints.shape[0]
 
             xvec[i,:] = x0
-            yvec[i,:] = self.sys.getOutput(x0, vvec[i,:])
+            # yvec[i,:] = self.sys.getOutput(x0, vvec[i,:])
+            i1 = i + measurement_delay
+            if i1 < self.N:
+                yvec[i1,:] = self.sys.getOutput(x0, vvec[i1,:])
 
             # Bound x,y,z errors for stability
             err = xref - x0
@@ -307,7 +334,7 @@ class Simulator():
         self.xvec = xvec
         self.uvec = uvec
         self.yvec = yvec
-        return self.tvec, xvec, uvec, yvec
+        return self.tvec, X0, xvec, uvec, yvec
     
 
     def simulate_free_response(self, x0, u=None, zero_disturbance=False, zero_noise=False):
