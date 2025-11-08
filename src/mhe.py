@@ -3,14 +3,15 @@ from math import sin, cos
 import cvxpy as cp
 from scipy.optimize import minimize, LinearConstraint
 import copy
-from src.pcip import PCIPQP
-from src.l1ao import L1AOQP
 from src.utils import build_mhe_qp_with_dyn_constraints, build_mhe_qp_with_dyn_constraints_lagrangian, build_mhe_qp
 
 
 class MHE():
 
-    def __init__(self, model, ts, N, X0, P0, xs, us, mhe_type="linearized_once", mhe_update="filtering", prior_method="zero", solver=None):
+    def __init__(
+            self, model, ts, N, X0, P0, xs, us,
+            mhe_type="linearized_once", mhe_update="filtering", prior_method="zero",
+            solver=None, pcip_obj=None, l1ao_obj=None):
         """
         Args:
             model: dynamical model object
@@ -66,19 +67,13 @@ class MHE():
         self.X0 = X0
 
         if self.solver in ["pcip", "pcip_l1ao"]:
-            self.pcip = PCIPQP(
-                alpha=.1/self.ts,   # correction gain
-                ts=self.ts,
-                estimate_grad_zt=True   # estimate grad_zt_phi by finite differences
-            )
+            if pcip_obj is None:
+                raise ValueError("Missing 'pcip_obj'.")
+            self.pcip = pcip_obj
         if self.solver == "pcip_l1ao":
-            self.l1ao = L1AOQP(
-                ts=self.ts,
-                a=-.1,         # diagonal Hurwitz As matrix
-                lpf_omega=50.,   # low-pass filter bandwidth
-                estimate_grad_zt=True,  # estimate grad_zt_phi by finite differences
-                # clip_zdot=True          # clip za_dot for stability
-            )
+            if l1ao_obj is None:
+                raise ValueError("Missing 'l1ao_obj'.")
+            self.l1ao = l1ao_obj
 
     def updateModel(self, A, B, G, C):
         # Discretize
@@ -297,7 +292,8 @@ class MHE():
                 # z = [x(0), w(0), ..., w(N-1)]
                 # Initialize z0
                 if not hasattr(self, 'tvopt_z0'):    # T=0: initialize z=0
-                    z0    = np.zeros((self.Nx,))
+                    # z0    = np.zeros((self.Nx,))
+                    z0 = X0
                     zdot0 = np.zeros((self.Nx,))
                     if self.solver == "pcip_l1ao":
                         za_dot0       = np.zeros((self.Nx,))
