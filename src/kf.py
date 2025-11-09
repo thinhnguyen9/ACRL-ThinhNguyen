@@ -41,7 +41,7 @@ class KF():
         self.Q = Q
         self.R = R
 
-    def prediction(self, x0, u0):
+    def prediction(self, x0, u0, t=0.):
         """
         Predict the mean and covariance of xhat(k+1) before correction.
         
@@ -55,7 +55,7 @@ class KF():
         if self.type == "standard":
             dx = self.A @ (x0 - self.xs) + self.B @ (u0 - self.us)
         elif self.type == "extended":
-            dx = self.model.dx(x0, u0)
+            dx = self.model.dx(x0, u0, t=t)
         x = x0 + dx*self.ts
 
         # P0(k+1) = A(k)*P(k)*A(k)' + G(k)*Q*G(k)'
@@ -64,14 +64,14 @@ class KF():
             G = self.G
         elif self.type == "extended":
             # A, G linearized around xhat(k) (after correction)
-            A, _, G, _ = self.model.linearize(x0, u0)
+            A, _, G, _ = self.model.linearize(x0, u0, t=t)
         A = np.eye(self.Nx) + A*self.ts
         G = G*self.ts
         self.P0 = A @ self.P @ A.T + G @ self.Q @ G.T
 
         return x
         
-    def correction(self, x0, y):
+    def correction(self, x0, y, t=0.):
         """
         Update the mean and covariance of xhat(k) after measurement.
         
@@ -86,7 +86,7 @@ class KF():
         elif self.type == "extended":
             # C linearized around xhat(k) (before correction)
             # assume y=h(x) and does not depend on u - choose random u - TODO: need latest u?
-            _, _, _, C = self.model.linearize(x0, np.zeros(self.Nu))
+            _, _, _, C = self.model.linearize(x0, np.zeros(self.Nu), t=t)
 
         # L(k) = P0(k)*C(k)'*inv(R + C(k)*P0(k)*C(k)')
         L = self.P0 @ C.T @ np.linalg.inv(self.R + C @ self.P0 @ C.T)

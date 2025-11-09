@@ -103,6 +103,7 @@ class MHE():
         N = min(self.N, T)
         if np.size(uvec, 0) != T:
             raise ValueError("yvec and uvec did not agree in size (yvec must have N+1 rows, uvec must have N rows)!")
+        tvec = [(T-N+k)*self.ts for k in range(N+1)]    # T-N...T
         
         if T <= self.N:
             # Do Full Information Estimation (FIE) if T <= N
@@ -150,14 +151,14 @@ class MHE():
                 xnom = np.zeros((N+1, self.Nx))     # x(T-N)...x(T)
                 xnom[0] = X0
                 for k in range(N):
-                    xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k])*self.ts
+                    xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k], t=tvec[k])*self.ts
 
             elif self.mhe_update in ["smoothing", "smoothing_naive"]:
                 # Use nonlinear model to get nominal trajectory
                 # xnom = np.zeros((N+1, self.Nx))     # x(T-N)...x(T)
                 # xnom[0] = X0
                 # for k in range(N):
-                #     xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k])*self.ts
+                #     xnom[k+1] = xnom[k] + self.model.dx(xnom[k], useq_raw[k], t=tvec[k])*self.ts
                     
                 # # Use self.xvec as nominal trajectory
                 if T == 0:
@@ -166,7 +167,7 @@ class MHE():
                 else:
                     # self.xvec  : x(0)...x(T-1), OR
                     # self.xvec  : x(T-N-1)...x(T-1)
-                    xTnom = self.xvec[-1] + self.model.dx(self.xvec[-1], useq_raw[-1])*self.ts
+                    xTnom = self.xvec[-1] + self.model.dx(self.xvec[-1], useq_raw[-1], t=tvec[-2])*self.ts
                     xnom = np.concatenate((self.xvec[-self.N:], xTnom.reshape((1,self.Nx))), axis=0)
 
             X0 = np.zeros(self.Nx)
@@ -191,7 +192,7 @@ class MHE():
             # given P(T-1|T-1), iterate from P(T-2|T-1) till P(T-N|T-1) (N-1 steps)
             P_temp = self.Pvec1[-1]    # P(T-1|T-1)
             for i in range(N-1):    # k=T-2,...,T-N
-                A, _, _, _ = self.model.linearize(self.xvec[-i-2], useq_raw[-i-2])  # A(T-2)
+                A, _, _, _ = self.model.linearize(self.xvec[-i-2], useq_raw[-i-2], t=tvec[-i-3])  # A(T-2)
                 A = np.eye(self.Nx) + A*self.ts
 
                 # C(k) = P(k|k) * A'(k) * inv(P(k+1|k))
@@ -215,7 +216,7 @@ class MHE():
             C_seq = np.zeros((N+1, self.Ny, self.Nx))
             for k in range(N):
                 if self.mhe_type == "linearized_every":   # Linearize around nominal trajectory
-                    A, B, G, C = self.model.linearize(xnom[k], useq_raw[k])
+                    A, B, G, C = self.model.linearize(xnom[k], useq_raw[k], t=tvec[k])
                     self.updateModel(A, B, G, C)
                 A_seq[k], B_seq[k], G_seq[k], C_seq[k] = self.A, self.B, self.G, self.C
             C_seq[N] = self.C    # TODO: relinearize??
@@ -346,57 +347,58 @@ class MHE():
         # %% ========================================================================================================= #
         #                                   OPTIMIZATION - NONLINEAR MHE (scipy.optimize)
         # ============================================================================================================ #
-        elif self.mhe_type in ["nonlinear"]:
-            def cost_fun(z):    # for nonlinear MHE using scipy.optimize.minimze
-                x0 = z[ : self.Nx]
-                w = z[self.Nx : ].reshape((N, self.Nx))
+        # Too many changes - need to update nonlinear MHE!
+        # elif self.mhe_type in ["nonlinear"]:
+        #     def cost_fun(z):    # for nonlinear MHE using scipy.optimize.minimze
+        #         x0 = z[ : self.Nx]
+        #         w = z[self.Nx : ].reshape((N, self.Nx))
 
-                # Arrival cost - adjusted for smoothing scheme
-                if self.prior_method == "zero":
-                    cost = 0.0
-                else:
-                    cost = .5 * (x0 - X0).T @ np.linalg.inv(P0) @ (x0 - X0)
-                """
-                if self.mhe_update == "smoothing" and N > 1:
-                    # a_random_matrix = np.zeros((self.Ny*N, self.Nu*N))
-                    # for r in range(N):
-                    #     for c in range(r):
-                    #         a_random_matrix[r*self.Ny:(r+1)*self.Ny, c*self.Nx:(c+1)*self.Nx] = self.C @ np.linalg.matrix_power(self.A, r-c-1) @ self.B
-                    # uflat = u.flatten()         # u(T-N)...u(T-1)
-                    # yflat = y[:-1].flatten()    # y(T-N)...y(T-1)
-                    # temp = yflat - O@x0 - a_random_matrix@uflat
-                    # cost -= .5 * temp.T @ W_inv @ temp
+        #         # Arrival cost - adjusted for smoothing scheme
+        #         if self.prior_method == "zero":
+        #             cost = 0.0
+        #         else:
+        #             cost = .5 * (x0 - X0).T @ np.linalg.inv(P0) @ (x0 - X0)
+        #         """
+        #         if self.mhe_update == "smoothing" and N > 1:
+        #             # a_random_matrix = np.zeros((self.Ny*N, self.Nu*N))
+        #             # for r in range(N):
+        #             #     for c in range(r):
+        #             #         a_random_matrix[r*self.Ny:(r+1)*self.Ny, c*self.Nx:(c+1)*self.Nx] = self.C @ np.linalg.matrix_power(self.A, r-c-1) @ self.B
+        #             # uflat = u.flatten()         # u(T-N)...u(T-1)
+        #             # yflat = y[:-1].flatten()    # y(T-N)...y(T-1)
+        #             # temp = yflat - O@x0 - a_random_matrix@uflat
+        #             # cost -= .5 * temp.T @ W_inv @ temp
 
-                    yflat = y[:-1].flatten()    # y(T-N)...y(T-1)
-                    temp = yflat - O@x0
-                    cost -= .5 * temp.T @ W_inv @ temp
-                """
-                # Running cost
-                for k in range(N):
-                    y_pred = self.model.getOutput(x0)
-                    cost += .5*w[k].T @ self.Q_inv @ w[k] + .5*(y[k] - y_pred).T @ self.R_inv @ (y[k] - y_pred)
-                    x0 = x0 + self.model.dx(x0, u[k], w[k]) * self.ts   # x(k+1)
-                y_pred = self.model.getOutput(x0)
-                cost += .5*(y[N] - y_pred).T @ self.R_inv @ (y[N] - y_pred)
-                return cost
+        #             yflat = y[:-1].flatten()    # y(T-N)...y(T-1)
+        #             temp = yflat - O@x0
+        #             cost -= .5 * temp.T @ W_inv @ temp
+        #         """
+        #         # Running cost
+        #         for k in range(N):
+        #             y_pred = self.model.getOutput(x0)
+        #             cost += .5*w[k].T @ self.Q_inv @ w[k] + .5*(y[k] - y_pred).T @ self.R_inv @ (y[k] - y_pred)
+        #             x0 = x0 + self.model.dx(x0, u[k], w[k]) * self.ts   # x(k+1)
+        #         y_pred = self.model.getOutput(x0)
+        #         cost += .5*(y[N] - y_pred).T @ self.R_inv @ (y[N] - y_pred)
+        #         return cost
             
-            state_constraint = []
-            # A = np.zeros([2, self.Nx + N*self.Nx])
-            # A[0,0] = 1.
-            # A[1,1] = 1.
-            # state_constraint = LinearConstraint(A, 0., np.inf)
+        #     state_constraint = []
+        #     # A = np.zeros([2, self.Nx + N*self.Nx])
+        #     # A[0,0] = 1.
+        #     # A[1,1] = 1.
+        #     # state_constraint = LinearConstraint(A, 0., np.inf)
         
-            w_init = np.zeros(self.Nx*N)
-            z_init = np.concatenate([X0, w_init])
-            res = minimize(cost_fun, z_init, constraints=state_constraint, method='SLSQP', options={'maxiter': 100, 'ftol': 1e-6})
-            x0 = res.x[ : self.Nx]
-            w = res.x[self.Nx : ].reshape((N, self.Nx))
-            # Rescontruct trajectory
-            xvec = np.zeros((N+1, self.Nx))
-            xvec[0] = x0
-            for k in range(N):
-                xvec[k+1] = xvec[k] + self.model.dx(xvec[k], u[k], w[k]) * self.ts
-            # print("Done 1 loop of nonlinear MHE!")
+        #     w_init = np.zeros(self.Nx*N)
+        #     z_init = np.concatenate([X0, w_init])
+        #     res = minimize(cost_fun, z_init, constraints=state_constraint, method='SLSQP', options={'maxiter': 100, 'ftol': 1e-6})
+        #     x0 = res.x[ : self.Nx]
+        #     w = res.x[self.Nx : ].reshape((N, self.Nx))
+        #     # Rescontruct trajectory
+        #     xvec = np.zeros((N+1, self.Nx))
+        #     xvec[0] = x0
+        #     for k in range(N):
+        #         xvec[k+1] = xvec[k] + self.model.dx(xvec[k], u[k], w[k]) * self.ts
+        #     # print("Done 1 loop of nonlinear MHE!")
 
         # %% ========================================================================================================= #
         #                                               UPDATE self.xvec
@@ -422,7 +424,7 @@ class MHE():
             # Calculate P(T|T) from P(T|T-1)
             P0 = self.Pvec[-1]  # P(T|T-1)
             if self.mhe_type in ["linearized_every", "nonlinear"]:  # Linearize around xhat(T|T)
-                A, B, G, C = self.model.linearize(self.xvec[-1], useq_raw[-1] if N > 0 else self.us)    # TODO: do we need correct u here?
+                A, B, G, C = self.model.linearize(self.xvec[-1], useq_raw[-1] if N>0 else self.us, t=tvec[-1]) # TODO: need correct u?
                 self.updateModel(A, B, G, C)
             R_k = np.linalg.inv(Rinv_seq[-1])
             Q_k = np.linalg.inv(Qinv_seq[-1])

@@ -328,7 +328,7 @@ class Simulator():
             uvec[i,:] = u
 
             # Propagate dynamics
-            dx = self.sys.dx(x0, u, wvec[i,:])
+            dx = self.sys.dx(x0, u, wvec[i,:], t=self.tvec[i])
             x0 += dx*self.ts
 
         self.xvec = xvec
@@ -382,9 +382,9 @@ class Simulator():
                     Q = self.Q[i],
                     R = self.R[i]
                 )
-                x0hat = estimator.correction(x0hat, self.yvec[i])
+                x0hat = estimator.correction(x0hat, self.yvec[i], t=self.tvec[i])
                 xhat[i] = x0hat
-                x0hat = estimator.prediction(x0hat, self.uvec[i])
+                x0hat = estimator.prediction(x0hat, self.uvec[i], t=self.tvec[i])
 
             # -------------- Linear MHE --------------
             elif estimator_class == 'MHE':

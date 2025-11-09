@@ -327,12 +327,17 @@ class Quadrotor2(DynamicalSystem):
             self,
             m=1.0,
             g=9.81,
-            J=np.diag([0.005, 0.005, 0.009])
+            J=np.diag([0.005, 0.005, 0.009]),
+            time_varying_mass=False,
+            mass_scale_rate_of_change=0.
         ):
         self.m = m        # mass (kg)
         self.g = g        # gravity (m/s^2)
         self.J = J        # inertia matrix (3×3)
         self.J_inv = np.linalg.inv(J)
+        self.time_varying_mass          = time_varying_mass
+        self.mass_scale_ROC             = mass_scale_rate_of_change
+        self.m0, self.J0, self.J0_inv   = m, J.copy(), self.J_inv.copy()
 
         # Model dimensions
         self.Nx = 12
@@ -410,13 +415,16 @@ class Quadrotor2(DynamicalSystem):
     # ----------------------------------------------------
     # 1. Dynamics
     # ----------------------------------------------------
-    def dx(self, x, u, w=None):
+    def dx(self, x, u, w=None, t=0.):
         """
         Compute continuous-time dynamics xdot = f(x,u,w).
         w: process noise
         """
         if w is None:
             w = np.zeros(self.Nx)
+
+        if self.time_varying_mass:
+            self.update_mass_and_inertia(t)
 
         # State unpacking
         X, Y, Z, Xd, Yd, Zd, phi, theta, psi, p, q, r = x
@@ -450,7 +458,10 @@ class Quadrotor2(DynamicalSystem):
     # ----------------------------------------------------
     # 2. Linearization (A,B,G,C matrices)
     # ----------------------------------------------------
-    def linearize(self, x, u):
+    def linearize(self, x, u, t=0.):
+
+        if self.time_varying_mass:
+            self.update_mass_and_inertia(t)
 
         # State unpacking
         X, Y, Z, Xd, Yd, Zd, phi, theta, psi, p, q, r = x
@@ -519,4 +530,13 @@ class Quadrotor2(DynamicalSystem):
 
         return matA, matB, self.G, self.C
 
-    
+    def update_mass_and_inertia(self, t):
+        # Update scaling for mass/inertia
+        # Rule: mass_scale=1 at t=0
+        mass_scale = 1. + self.mass_scale_ROC*t
+        mass_scale = saturate(mass_scale, 0.5, 1.5)
+        
+        # Update mass and inertia
+        self.m = self.m0*mass_scale
+        # self.J = self.J0*mass_scale
+        # self.J_inv = self.J0_inv*1./mass_scale
