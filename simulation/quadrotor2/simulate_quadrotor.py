@@ -9,12 +9,15 @@ import copy
 import time
 import csv
 from datetime import datetime
+import os
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 from src.kf import KF
 from src.mhe import MHE
 from models.quadrotors import Quadrotor2
 from src.simulator import Simulator
+from src.pcip import PCIPQP
+from src.l1ao import L1AOQP
 
 def main(
         enabled_estimators,
@@ -22,22 +25,30 @@ def main(
         v_stds,     # max error ~ 3 std.dev.
         w_means,    # Process noise (gaussian)
         w_stds,     # max error ~ 3 std.dev.
-        X0,         # initial estmate (unused in this simulation)
-        P0,         # initial covariance
+        x0_stds,    # Initial state ~ uniform distribution
+        P0,         # initial covariance penalty
         trajectory_shape='p2p',
         Q=None,     # weighting matrix, override if needed
         R=None,     # weighting matrix, override if needed
         T=1.0,
-        t0=0,
+        t0=0.,
         ts=0.01,
         loops=1,
         mhe_horizon=10,
         mhe_update="filtering",
         prior_method="ekf",
+        zero_measurement_noise=False,
+        zero_process_noise=False,
         time_varying_measurement_noise=False,
         bad_model_knowledge=False,
+        keep_initial_guess=False,
         save_csv=False,
-        enable_plot=False
+        enable_plot=False,
+        measurement_delay=0,
+        lmhe2_pcip_alpha=1./.01,
+        lmhe3_pcip_alpha=1./.01,
+        lmhe3_l1ao_As=-.1,
+        lmhe3_l1ao_omega=50.
     ):
     
     # ----------------------- Quadrotor -----------------------
@@ -50,7 +61,7 @@ def main(
         drone_est = Quadrotor2(     # used for estimation
             m=1.5,
             g=9.81,
-            J=np.diag([0.005, 0.005, 0.009])*1.2
+            J=np.diag([0.005, 0.005, 0.009])*1.5
         )
     else:
         drone_est = copy.deepcopy(drone)
@@ -78,14 +89,15 @@ def main(
     print(f"Prior weighting    : " + prior_method)
 
     sim = Simulator(
-        mode = 'quadrotor',
-        sys = drone,
+        mode    = 'quadrotor',
+        sys     = drone,
         w_means = w_means,
-        w_stds = w_stds,
+        w_stds  = w_stds,
         v_means = v_means,
-        v_stds = v_stds,
-        T = T,
-        ts = ts,
+        v_stds  = v_stds,
+        x0_stds = x0_stds,
+        T       = T,
+        ts      = ts,
         # noise_distribution = 'uniform',
         time_varying_measurement_noise = time_varying_measurement_noise,
         use_QR_guess = use_QR_guess,
@@ -97,109 +109,135 @@ def main(
     # ----------------------- Run estimation -----------------------
     for loop in range(loops):
         print("================ Simulation instance " + str(loop+1) + " of " + str(loops) + " ================")
+        tvec, x0, xvec, uvec, yvec = sim.simulate_quadrotor_lqr_control(
+                seed                = loop,    # for deterministic measurement noise generation
+                traj_mode           = trajectory_shape,
+                zero_disturbance    = zero_process_noise,
+                zero_noise          = zero_measurement_noise,
+                measurement_delay   = measurement_delay
+        )
+        # Initial estimate variation
+        x0 = x0 + np.random.uniform(low=x0_stds[0], high=x0_stds[1])
+        
         # Initialize estimators - must be done every loop
         if 'KF' in enabled_estimators:
             SKF = KF(
-                model = drone_est,
-                ts = sim.get_time_step(),
-                P0 = P0,
-                type = "standard",
-                xs = xhover_est,
-                us = uhover_est
+                model   = drone_est,
+                ts      = sim.get_time_step(),
+                P0      = P0,
+                type    = "standard",
+                xs      = xhover_est,
+                us      = uhover_est
             )
         if 'EKF' in enabled_estimators:
             EKF = KF(
-                model = drone_est,
-                ts = sim.get_time_step(),
-                P0 = P0,
-                type = "extended"
+                model   = drone_est,
+                ts      = sim.get_time_step(),
+                P0      = P0,
+                type    = "extended"
             )
         if 'LMHE1' in enabled_estimators:
             LMHE_cvxpy = MHE(
-                model = drone_est,
-                ts = sim.get_time_step(),
-                N = mhe_horizon,
-                X0 = xhover_est,
-                P0 = P0,
-                mhe_type = "linearized_every",
-                mhe_update = mhe_update,
-                prior_method = prior_method,
-                solver = None,
-                xs = xhover_est,
-                us = uhover_est
+                model           = drone_est,
+                ts              = sim.get_time_step(),
+                N               = mhe_horizon,
+                X0              = x0,
+                P0              = P0,
+                mhe_type        = "linearized_every",
+                mhe_update      = mhe_update,
+                prior_method    = prior_method,
+                solver          = None,
+                xs              = xhover_est,
+                us              = uhover_est
             )
         if 'LMHE2' in enabled_estimators:
+            lmhe2_pcip_obj = PCIPQP(
+                alpha   = lmhe2_pcip_alpha,
+                ts      = ts,
+                estimate_grad_zt = True
+            )
             LMHE_pcip = MHE(
-                model = drone_est,
-                ts = sim.get_time_step(),
-                N = mhe_horizon,
-                X0 = xhover_est,
-                P0 = P0,
-                mhe_type = "linearized_every",
-                mhe_update = mhe_update,
-                prior_method = prior_method,
-                solver = "pcip",
-                xs = xhover_est,
-                us = uhover_est
+                model           = drone_est,
+                ts              = sim.get_time_step(),
+                N               = mhe_horizon,
+                X0              = x0,
+                P0              = P0,
+                mhe_type        = "linearized_every",
+                mhe_update      = mhe_update,
+                prior_method    = prior_method,
+                solver          = "pcip",
+                xs              = xhover_est,
+                us              = uhover_est,
+                pcip_obj        = lmhe2_pcip_obj
             )
         if 'LMHE3' in enabled_estimators:
+            lmhe3_pcip_obj = PCIPQP(
+                alpha   = lmhe3_pcip_alpha,
+                ts      = ts,
+                estimate_grad_zt = True
+            )
+            lmhe3_l1ao_obj = L1AOQP(
+                ts          = ts,
+                a           = lmhe3_l1ao_As,
+                lpf_omega   = lmhe3_l1ao_omega,
+                estimate_grad_zt = True,
+                # clip_zdot = True
+            )
             LMHE_pcip_l1ao = MHE(
-                model = drone_est,
-                ts = sim.get_time_step(),
-                N = mhe_horizon,
-                X0 = xhover_est,
-                P0 = P0,
-                mhe_type = "linearized_every",
-                mhe_update = mhe_update,
-                prior_method = prior_method,
-                solver = "pcip_l1ao",
-                xs = xhover_est,
-                us = uhover_est
+                model           = drone_est,
+                ts              = sim.get_time_step(),
+                N               = mhe_horizon,
+                X0              = x0,
+                P0              = P0,
+                mhe_type        = "linearized_every",
+                mhe_update      = mhe_update,
+                prior_method    = prior_method,
+                solver          = "pcip_l1ao",
+                xs              = xhover_est,
+                us              = uhover_est,
+                pcip_obj        = lmhe3_pcip_obj,
+                l1ao_obj        = lmhe3_l1ao_obj
             )
         if 'NMHE' in enabled_estimators:
             NMHE = MHE(
-                model = drone_est,
-                ts = sim.get_time_step(),
-                N = mhe_horizon,
-                X0 = xhover_est,
-                P0 = P0,
-                mhe_type = "nonlinear",
-                mhe_update = mhe_update,
-                prior_method = prior_method,
-                solver = None,  # nonlinear MHE cannot use QP PCIP!!
-                xs = xhover_est,
-                us = uhover_est
+                model           = drone_est,
+                ts              = sim.get_time_step(),
+                N               = mhe_horizon,
+                X0              = x0,
+                P0              = P0,
+                mhe_type        = "nonlinear",
+                mhe_update      = mhe_update,
+                prior_method    = prior_method,
+                solver          = None,  # nonlinear MHE cannot use QP PCIP!!
+                xs              = xhover_est,
+                us              = uhover_est
             )
 
-        tvec, xvec, uvec, yvec = sim.simulate_quadrotor_lqr_control(
-                traj_mode = trajectory_shape,
-                # x0 = copy.deepcopy(xhover_est),
-                # x0 = np.array([ 0., 0., 0., 0., -1., 0.,
-                #                 .35, -.35, 0.,
-                #                 0., 0., 0.,
-                #                 drone.f_h*.8, drone.f_h*.9, drone.f_h*1.2, drone.f_h*1.1 ]),
-                # zero_disturbance = True,
-                # zero_noise = True
-        )
         N = len(tvec)
         if 'KF' in enabled_estimators:
-            xhat_kf, kf_time = sim.run_estimation(SKF, xhover_est)
+            xhat_kf, kf_time = sim.run_estimation(SKF, x0)
             rmse_kf = np.sqrt(np.mean((xvec[t0:] - xhat_kf[t0:])**2))
+            if keep_initial_guess: xhat_kf[0] = x0.copy()
         if 'EKF' in enabled_estimators:
-            xhat_ekf, ekf_time = sim.run_estimation(EKF, xhover_est)
+            xhat_ekf, ekf_time = sim.run_estimation(EKF, x0)
             rmse_ekf = np.sqrt(np.mean((xvec[t0:] - xhat_ekf[t0:])**2))
+            if keep_initial_guess: xhat_ekf[0] = x0.copy()
         if 'LMHE1' in enabled_estimators:
-            xhat_lmhe1, lmhe1_time = sim.run_estimation(LMHE_cvxpy, xhover_est)
+            xhat_lmhe1, lmhe1_time = sim.run_estimation(LMHE_cvxpy, x0)
             rmse_lmhe1 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe1[t0:])**2))
+            if keep_initial_guess: xhat_lmhe1[0] = x0.copy()
         if 'LMHE2' in enabled_estimators:
-            xhat_lmhe2, lmhe2_time = sim.run_estimation(LMHE_pcip, xhover_est)
+            xhat_lmhe2, lmhe2_time = sim.run_estimation(LMHE_pcip, x0)
             rmse_lmhe2 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe2[t0:])**2))
+            if keep_initial_guess: xhat_lmhe2[0] = x0.copy()
         if 'LMHE3' in enabled_estimators:
-            xhat_lmhe3, lmhe3_time = sim.run_estimation(LMHE_pcip_l1ao, xhover_est)
+            xhat_lmhe3, lmhe3_time = sim.run_estimation(LMHE_pcip_l1ao, x0)
             rmse_lmhe3 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe3[t0:])**2))
+            if keep_initial_guess: xhat_lmhe3[0] = x0.copy()
         if 'NMHE' in enabled_estimators:
-            xhat_nmhe, nmhe_time = sim.run_estimation(NMHE, xhover_est)
+            xhat_nmhe, nmhe_time = sim.run_estimation(NMHE, x0)
             rmse_nmhe = np.sqrt(np.mean((xvec[t0:] - xhat_nmhe[t0:])**2))
+            if keep_initial_guess: xhat_nmhe[0] = x0.copy()
 
         print(f"(k={t0:.0f} onwards)      RMSE\tAvg. step time (ms)")
         if 'KF' in enabled_estimators:      print(f"KF                : {rmse_kf:.4f}\t\t{kf_time*1000./N:.4f}")
@@ -216,13 +254,15 @@ def main(
         if save_csv:
             data = []
             date_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-            # date,estimator,RMSE,max_err,computation_time_per_step,T,ts
-            if 'KF' in enabled_estimators:      data.append([date_str, 'KF',    rmse_kf,    np.max(np.abs(xvec-xhat_kf)),    kf_time*1000./N,    T, ts])
-            if 'EKF' in enabled_estimators:     data.append([date_str, 'EKF',   rmse_ekf,   np.max(np.abs(xvec-xhat_ekf)),   ekf_time*1000./N,   T, ts])
-            if 'LMHE1' in enabled_estimators:   data.append([date_str, 'LMHE1', rmse_lmhe1, np.max(np.abs(xvec-xhat_lmhe1)), lmhe1_time*1000./N, T, ts])
-            if 'LMHE2' in enabled_estimators:   data.append([date_str, 'LMHE2', rmse_lmhe2, np.max(np.abs(xvec-xhat_lmhe2)), lmhe2_time*1000./N, T, ts])
-            if 'NMHE' in enabled_estimators:    data.append([date_str, 'NMHE',  rmse_nmhe,  np.max(np.abs(xvec-xhat_nmhe)),  nmhe_time*1000./N,  T, ts])
-            with open('simulation/quadrotor/sim_instances.csv', 'a', newline='') as csvfile:
+            # date,estimator,RMSE,max_err,computation_time_per_step,T,ts,rmse_start
+            if 'KF' in enabled_estimators:      data.append([date_str, 'KF',    rmse_kf,    np.max(np.abs(xvec-xhat_kf)),    kf_time*1000./N,    T, ts, t0])
+            if 'EKF' in enabled_estimators:     data.append([date_str, 'EKF',   rmse_ekf,   np.max(np.abs(xvec-xhat_ekf)),   ekf_time*1000./N,   T, ts, t0])
+            if 'LMHE1' in enabled_estimators:   data.append([date_str, 'LMHE1', rmse_lmhe1, np.max(np.abs(xvec-xhat_lmhe1)), lmhe1_time*1000./N, T, ts, t0])
+            if 'LMHE2' in enabled_estimators:   data.append([date_str, 'LMHE2', rmse_lmhe2, np.max(np.abs(xvec-xhat_lmhe2)), lmhe2_time*1000./N, T, ts, t0])
+            if 'LMHE3' in enabled_estimators:   data.append([date_str, 'LMHE3', rmse_lmhe3, np.max(np.abs(xvec-xhat_lmhe3)), lmhe3_time*1000./N, T, ts, t0])
+            if 'NMHE' in enabled_estimators:    data.append([date_str, 'NMHE',  rmse_nmhe,  np.max(np.abs(xvec-xhat_nmhe)),  nmhe_time*1000./N,  T, ts, t0])
+            file_path = os.path.join(os.path.dirname(__file__), 'sim_instances.csv')
+            with open(file_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
                 writer.writerows(data)
     print("============================================================")
@@ -402,25 +442,53 @@ if __name__ == "__main__":
     """
     main(
         enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
-        trajectory_shape='triangle',  # 'p2p' (default), 'circle, 'triangle'
-        v_means=np.zeros(6),
-        w_means=np.zeros(12),
-        v_stds=np.array([.5, .5, .5, .3, .3, .3])/3,
-        w_stds=np.array([1e-1, 1e-1, 1e-1, 2., 2., 2.,
-                         1e-1, 1e-1, 1e-1, .5, .5, .5])/3,
-        X0=None,
-        P0=np.eye(12) * 1e0,
-        Q=np.diag([1.]*12),  # override both Q,R to use these (bad) values for estimation
-        R=np.diag([1.]*6),   # lower Q = trust model, lower R = trust measurements
-        T=10.,
-        t0=0.,  # time to start RMSE calculation (to skip transient phase)
+        trajectory_shape='circle',  # 'p2p' (default), 'circle, 'triangle'
+        T=5.,
+        t0=1.,  # time to start RMSE calculation (to skip transient phase)
         # ts=0.001,
         # loops=5,
-        # mhe_horizon  = 24,
-        mhe_update   = "smoothing",     # "filtering" (default), "smoothing", or "smoothing_naive"
-        # prior_method = "uniform",           # "zero", "uniform", "ekf" (default)
         # time_varying_measurement_noise = True,
-        # bad_model_knowledge = True,
+        bad_model_knowledge=True,
+        # measurement_delay=2,    # measurement delayed by how many time steps
+        keep_initial_guess=True,  # keep initial guess at T=0 (so all estimators look like they start at the same x0)
+                                  # purely for plotting purpose
         # save_csv=True,
-        enable_plot=True
+        enable_plot=True,
+        
+        # ---------------- Actual noise characteristics ----------------
+        # zero_measurement_noise=True,
+        # zero_process_noise=True,
+        v_means=np.zeros(6),
+        w_means=np.zeros(12),
+        v_stds=np.array([.09, .09, .09, .3, .3, .3])/3,    # Measurement noise ~ Gaussian (max ~ 3 std.dev.)
+        w_stds=np.array([1e-6, 1e-6, 1e-6, .5, .5, .5,  # Disturbance: sinunoidal in linear and angular accelerations
+                         1e-6, 1e-6, 1e-6, .2, .2, .2]),
+        # x0_stds=np.array([[-1., -1., -1., -.5, -.5, -.5, -.5, -.5, -.5, -1., -1., -1.],
+        #                   [1., 1., 1., .5, .5, .5, .5, .5, .5, 1., 1., 1.]]),   # Random initial guess ~ uniform distribution
+        x0_stds=np.array([[0., 0., -1., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
+
+        # ---------------- Covariance matrices for EKF/MHE ----------------
+        #       Override both Q,R to use these (bad) values for estimation
+        #       Lower Q = trust model, lower R = trust measurements
+        #       PCIP/L1AO might work better when trusting model (high R, low Q)
+        #       High Q might make L1AO converges very slowly
+        # Q=np.eye(12) * 0.5,
+        R=np.eye(6) * 0.01,
+        P0=np.eye(12) * 1e-2,
+        Q=np.diag([.1, .1, .1, 1., 1., 100.,
+                   1., 1., 1., .1, .1, .1]),
+        # R=np.diag([.2, .2, .2, .1, .1, .1]),
+        # P0=np.diag([.1, .1, .1, .01, .01, .01,
+        #             .1, .1, .1, .01, .01, .01]),
+
+        # ---------------- MHE settings ----------------
+        # mhe_horizon  = 18,              # longer horizon: lower P0 so PCIP/L1AO doesn't blow up
+        mhe_update   = "smoothing",     # "filtering" (default), "smoothing", or "smoothing_naive"
+        # prior_method = "uniform",     # "zero", "uniform", "ekf" (default)
+
+        # ---------------- TV solvers ----------------
+        lmhe2_pcip_alpha    = 1./.01,
+        lmhe3_pcip_alpha    = .6/.01,
+        lmhe3_l1ao_As       = -.1,
+        lmhe3_l1ao_omega    = 150.
     )
