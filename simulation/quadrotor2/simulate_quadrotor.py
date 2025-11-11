@@ -41,6 +41,7 @@ def main(
         zero_process_noise=False,
         time_varying_measurement_noise=False,
         bad_model_knowledge=False,
+        time_varying_dynamics=False,
         keep_initial_guess=False,
         save_csv=False,
         enable_plot=False,
@@ -53,15 +54,19 @@ def main(
     
     # ----------------------- Quadrotor -----------------------
     drone = Quadrotor2(
-        m=1.0,
-        g=9.81,
-        J=np.diag([0.005, 0.005, 0.009])
+        m                           = 1.0,
+        g                           = 9.81,
+        J                           = np.diag([0.005, 0.005, 0.009]),
+        time_varying_mass           = time_varying_dynamics,
+        mass_scale_rate_of_change   = -0.25   # per second
     )
     if bad_model_knowledge:
         drone_est = Quadrotor2(     # used for estimation
-            m=1.5,
-            g=9.81,
-            J=np.diag([0.005, 0.005, 0.009])*1.5
+            m                           = 1.0,
+            g                           = 9.81,
+            J                           = np.diag([0.005, 0.005, 0.009])*1.0,
+            time_varying_mass           = time_varying_dynamics,
+            mass_scale_rate_of_change   = -0.   # 0 means no change
         )
     else:
         drone_est = copy.deepcopy(drone)
@@ -105,6 +110,7 @@ def main(
         R_guess = R
     )
     t0 = int(t0/ts)
+    rng = np.random.default_rng(88)
 
     # ----------------------- Run estimation -----------------------
     for loop in range(loops):
@@ -114,10 +120,11 @@ def main(
                 traj_mode           = trajectory_shape,
                 zero_disturbance    = zero_process_noise,
                 zero_noise          = zero_measurement_noise,
-                measurement_delay   = measurement_delay
+                measurement_delay   = measurement_delay,
+                # time_varying_dynamics = time_varying_dynamics
         )
         # Initial estimate variation
-        x0 = x0 + np.random.uniform(low=x0_stds[0], high=x0_stds[1])
+        x0 = x0 + rng.uniform(low=x0_stds[0], high=x0_stds[1])
         
         # Initialize estimators - must be done every loop
         if 'KF' in enabled_estimators:
@@ -399,23 +406,26 @@ def main(
 
         if 'EKF' in enabled_estimators:
             plt.figure(4)
-            plt.suptitle('Estimation error')
+            # plt.suptitle('Estimation error')
             err_ekf   = np.linalg.norm(xvec - xhat_ekf, axis=1)
             if 'LMHE1' in enabled_estimators:   err_lmhe1 = np.linalg.norm(xvec - xhat_lmhe1, axis=1)
             if 'LMHE2' in enabled_estimators:   err_lmhe2 = np.linalg.norm(xvec - xhat_lmhe2, axis=1)
             if 'LMHE3' in enabled_estimators:   err_lmhe3 = np.linalg.norm(xvec - xhat_lmhe3, axis=1)
 
             plt.subplot(211)
+            plt.title('Estimation error')
             plt.plot(tvec, err_ekf, color='tab:red', ls='-', lw=1.5, label='EKF')
             if 'LMHE1' in enabled_estimators:   plt.plot(tvec, err_lmhe1, color='tab:blue', ls='-', lw=1.5, label='LMHE1')
             if 'LMHE2' in enabled_estimators:   plt.plot(tvec, err_lmhe2, color='tab:orange', ls='-', lw=1.5, label='LMHE2')
             if 'LMHE3' in enabled_estimators:   plt.plot(tvec, err_lmhe3, color='tab:green', ls='-', lw=1.5, label='LMHE3')
             plt.grid()
+            plt.xlabel('Time (s)')
             plt.ylabel(r'$\|x - \hat{x}\|$', fontsize=10)
             leg = plt.legend()
             leg.set_draggable(True)
 
             plt.subplot(212)
+            plt.title('Comparison with EKF')
             plt.axhline(0.0, color='tab:red', linestyle='--', linewidth=2.)
             if 'LMHE1' in enabled_estimators:   plt.plot(tvec, err_lmhe1-err_ekf, color='tab:blue', ls='-', lw=1.5, label='LMHE1-EKF')
             if 'LMHE2' in enabled_estimators:   plt.plot(tvec, err_lmhe2-err_ekf, color='tab:orange', ls='-', lw=1.5, label='LMHE2-EKF')
@@ -447,17 +457,20 @@ if __name__ == "__main__":
         t0=1.,  # time to start RMSE calculation (to skip transient phase)
         # ts=0.001,
         # loops=5,
-        # time_varying_measurement_noise = True,
-        bad_model_knowledge=True,
-        # measurement_delay=2,    # measurement delayed by how many time steps
         keep_initial_guess=True,  # keep initial guess at T=0 (so all estimators look like they start at the same x0)
                                   # purely for plotting purpose
         # save_csv=True,
         enable_plot=True,
-        
-        # ---------------- Actual noise characteristics ----------------
+
+        # ---------------- Corner cases ----------------
+        # time_varying_measurement_noise = True,
+        bad_model_knowledge=True,
+        time_varying_dynamics=True,
+        # measurement_delay=2,    # measurement delayed by how many time steps
         # zero_measurement_noise=True,
         # zero_process_noise=True,
+        
+        # ---------------- Actual noise characteristics ----------------
         v_means=np.zeros(6),
         w_means=np.zeros(12),
         v_stds=np.array([.09, .09, .09, .3, .3, .3])/3,    # Measurement noise ~ Gaussian (max ~ 3 std.dev.)
@@ -472,12 +485,15 @@ if __name__ == "__main__":
         #       Lower Q = trust model, lower R = trust measurements
         #       PCIP/L1AO might work better when trusting model (high R, low Q)
         #       High Q might make L1AO converges very slowly
-        # Q=np.eye(12) * 0.5,
-        R=np.eye(6) * 0.01,
+        #       Tuning Q: if a state converges slowly, increase Q for that state
+        # ----- good for normal case
+        # Q=np.eye(12) * 0.01,
+        # R=np.eye(6) * 0.01,
         P0=np.eye(12) * 1e-2,
+        # ----- good for bad model knowledge, fast convergence
         Q=np.diag([.1, .1, .1, 1., 1., 100.,
                    1., 1., 1., .1, .1, .1]),
-        # R=np.diag([.2, .2, .2, .1, .1, .1]),
+        R=np.diag([.01, .01, .01, .01, .01, .01]),
         # P0=np.diag([.1, .1, .1, .01, .01, .01,
         #             .1, .1, .1, .01, .01, .01]),
 
@@ -488,7 +504,7 @@ if __name__ == "__main__":
 
         # ---------------- TV solvers ----------------
         lmhe2_pcip_alpha    = 1./.01,
-        lmhe3_pcip_alpha    = .6/.01,
+        lmhe3_pcip_alpha    = .5/.01,
         lmhe3_l1ao_As       = -.1,
         lmhe3_l1ao_omega    = 150.
     )

@@ -249,10 +249,16 @@ class Simulator():
                                     0., np.pi/8, np.pi/7,
                                     0., 0., 0., 0. ])
             elif type(self.sys).__name__ == 'Quadrotor2':
-                w_omega = np.array([ 0., 0., 0., np.pi, 1.7*np.pi, 2.4*np.pi,     # external forces acting on Xdd, Ydd, Zdd
-                                     0., 0., 0., 1.5*np.pi, .9*np.pi, .4*np.pi])  # external moments acting on pd, qd, rd
-                w_phase = np.array([ 0., 0., 0., np.pi/4, np.pi/3, np.pi/5,
-                                     0., 0., 0., 0., np.pi/8, np.pi/7])
+                # w_omega = np.array([ 0., 0., 0., np.pi, 1.7*np.pi, 2.4*np.pi,     # external forces acting on Xdd, Ydd, Zdd
+                #                      0., 0., 0., 1.5*np.pi, .9*np.pi, .4*np.pi])  # external moments acting on pd, qd, rd
+                # w_phase = np.array([ 0., 0., 0., np.pi/4, np.pi/3, np.pi/5,
+                #                      0., 0., 0., 0., np.pi/8, np.pi/7])
+                rand_omega = rng.uniform(low=.5*np.pi, high=3.*np.pi, size=(6,))
+                rand_phase = rng.uniform(low=0.,       high=2.*np.pi, size=(6,))
+                w_omega = np.zeros((12,))
+                w_phase = np.zeros((12,))
+                w_omega[3:6], w_omega[9:12] = rand_omega[0:3], rand_omega[3:6]
+                w_phase[3:6], w_phase[9:12] = rand_phase[0:3], rand_phase[3:6]
             wvec = self.w_means + self.w_stds_fixed*np.sin(w_omega*self.tvec.reshape(self.N,1) + w_phase)
         
         # Measurement noise - Gaussian/uniform, high-frequency
