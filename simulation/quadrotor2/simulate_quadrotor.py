@@ -10,6 +10,7 @@ import time
 import csv
 from datetime import datetime
 import os
+import uuid
 
 sys.path.append(str(pathlib.Path(__file__).parent.parent.parent))
 from src.kf import KF
@@ -43,7 +44,9 @@ def main(
         bad_model_knowledge=False,
         time_varying_dynamics=False,
         keep_initial_guess=False,
-        save_csv=False,
+        save_csv_simulation_instance=False,
+        save_csv_estimation_error=False,
+        save_csv_raw_data=False,
         enable_plot=False,
         measurement_delay=0,
         lmhe2_pcip_alpha=1./.01,
@@ -111,6 +114,7 @@ def main(
     )
     t0 = int(t0/ts)
     rng = np.random.default_rng(88)
+    run_id = uuid.uuid4().hex[:8]
 
     # ----------------------- Run estimation -----------------------
     for loop in range(loops):
@@ -124,7 +128,14 @@ def main(
                 # time_varying_dynamics = time_varying_dynamics
         )
         # Initial estimate variation
-        x0 = x0 + rng.uniform(low=x0_stds[0], high=x0_stds[1])
+        x0var = rng.uniform(low=x0_stds[0], high=x0_stds[1])
+        norm_x0var = np.linalg.norm(x0var)
+        if norm_x0var == 0.:
+            x0var = np.zeros(drone.Nx)
+            x0var[0] = 1.
+            x0 = x0 + x0var
+        else:
+            x0 = x0 + x0var/norm_x0var  # normalize so that norm(e0)=1
         
         # Initialize estimators - must be done every loop
         if 'KF' in enabled_estimators:
@@ -258,20 +269,46 @@ def main(
         #     print(f"LMHE1-EKF RMSE: {np.sqrt(np.mean((xhat_lmhe1 - xhat_ekf)**2)):.4f}")
 
         # Save results of this instance
-        if save_csv:
+        if save_csv_simulation_instance:
             data = []
-            date_str = datetime.now().strftime("%Y/%m/%d %H:%M:%S")
-            # date,estimator,RMSE,max_err,computation_time_per_step,T,ts,rmse_start
-            if 'KF' in enabled_estimators:      data.append([date_str, 'KF',    rmse_kf,    np.max(np.abs(xvec-xhat_kf)),    kf_time*1000./N,    T, ts, t0])
-            if 'EKF' in enabled_estimators:     data.append([date_str, 'EKF',   rmse_ekf,   np.max(np.abs(xvec-xhat_ekf)),   ekf_time*1000./N,   T, ts, t0])
-            if 'LMHE1' in enabled_estimators:   data.append([date_str, 'LMHE1', rmse_lmhe1, np.max(np.abs(xvec-xhat_lmhe1)), lmhe1_time*1000./N, T, ts, t0])
-            if 'LMHE2' in enabled_estimators:   data.append([date_str, 'LMHE2', rmse_lmhe2, np.max(np.abs(xvec-xhat_lmhe2)), lmhe2_time*1000./N, T, ts, t0])
-            if 'LMHE3' in enabled_estimators:   data.append([date_str, 'LMHE3', rmse_lmhe3, np.max(np.abs(xvec-xhat_lmhe3)), lmhe3_time*1000./N, T, ts, t0])
-            if 'NMHE' in enabled_estimators:    data.append([date_str, 'NMHE',  rmse_nmhe,  np.max(np.abs(xvec-xhat_nmhe)),  nmhe_time*1000./N,  T, ts, t0])
-            file_path = os.path.join(os.path.dirname(__file__), 'sim_instances.csv')
+            if 'KF' in enabled_estimators:      data.append([run_id, loop+1, 'KF',    rmse_kf,    np.max(np.abs(xvec-xhat_kf)),    kf_time*1000./N,    T, ts, t0])
+            if 'EKF' in enabled_estimators:     data.append([run_id, loop+1, 'EKF',   rmse_ekf,   np.max(np.abs(xvec-xhat_ekf)),   ekf_time*1000./N,   T, ts, t0])
+            if 'LMHE1' in enabled_estimators:   data.append([run_id, loop+1, 'LMHE1', rmse_lmhe1, np.max(np.abs(xvec-xhat_lmhe1)), lmhe1_time*1000./N, T, ts, t0])
+            if 'LMHE2' in enabled_estimators:   data.append([run_id, loop+1, 'LMHE2', rmse_lmhe2, np.max(np.abs(xvec-xhat_lmhe2)), lmhe2_time*1000./N, T, ts, t0])
+            if 'LMHE3' in enabled_estimators:   data.append([run_id, loop+1, 'LMHE3', rmse_lmhe3, np.max(np.abs(xvec-xhat_lmhe3)), lmhe3_time*1000./N, T, ts, t0])
+            if 'NMHE' in enabled_estimators:    data.append([run_id, loop+1, 'NMHE',  rmse_nmhe,  np.max(np.abs(xvec-xhat_nmhe)),  nmhe_time*1000./N,  T, ts, t0])
+            file_path = os.path.join(os.path.dirname(__file__), 'simulation_instances.csv')
+            write_header = not os.path.exists(file_path)
             with open(file_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
+                if write_header:
+                    writer.writerow(['run_id','loop','estimator','RMSE','max_err','computation_time_per_step','T','ts','rmse_start'])
                 writer.writerows(data)
+        
+        # Write raw data (norm(x-xhat)) to csv
+        if save_csv_estimation_error:
+            if 'KF'    in enabled_estimators:   err_kf    = np.linalg.norm(xvec - xhat_kf,    axis=1)
+            if 'EKF'   in enabled_estimators:   err_ekf   = np.linalg.norm(xvec - xhat_ekf,   axis=1)
+            if 'LMHE1' in enabled_estimators:   err_lmhe1 = np.linalg.norm(xvec - xhat_lmhe1, axis=1)
+            if 'LMHE2' in enabled_estimators:   err_lmhe2 = np.linalg.norm(xvec - xhat_lmhe2, axis=1)
+            if 'LMHE3' in enabled_estimators:   err_lmhe3 = np.linalg.norm(xvec - xhat_lmhe3, axis=1)
+            if 'NMHE'  in enabled_estimators:   err_nmhe  = np.linalg.norm(xvec - xhat_nmhe,  axis=1)
+
+            file_path = os.path.join(os.path.dirname(__file__), 'estimation_error.csv')
+            write_header = not os.path.exists(file_path)
+            with open(file_path, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                if write_header:
+                    writer.writerow(['run_id','loop','estimator','T','time','estimation_error_norm'])
+                for i in range(N):
+                    t = float(tvec[i])
+                    if 'KF'    in enabled_estimators:   writer.writerow([run_id, loop+1, 'KF',    T, f"{t:.2f}", f"{err_kf[i]:.6f}"])
+                    if 'EKF'   in enabled_estimators:   writer.writerow([run_id, loop+1, 'EKF',   T, f"{t:.2f}", f"{err_ekf[i]:.6f}"])
+                    if 'LMHE1' in enabled_estimators:   writer.writerow([run_id, loop+1, 'LMHE1', T, f"{t:.2f}", f"{err_lmhe1[i]:.6f}"])
+                    if 'LMHE2' in enabled_estimators:   writer.writerow([run_id, loop+1, 'LMHE2', T, f"{t:.2f}", f"{err_lmhe2[i]:.6f}"])
+                    if 'LMHE3' in enabled_estimators:   writer.writerow([run_id, loop+1, 'LMHE3', T, f"{t:.2f}", f"{err_lmhe3[i]:.6f}"])
+                    if 'NMHE'  in enabled_estimators:   writer.writerow([run_id, loop+1, 'NMHE',  T, f"{t:.2f}", f"{err_nmhe[i]:.6f}"])
+            print("Data written to " + file_path)
     print("============================================================")
     xhat = xhat_ekf if 'EKF' in enabled_estimators else np.zeros_like(xvec)
     with open('simulation/quadrotor2/sim_data.npy', 'wb') as f:
@@ -453,19 +490,21 @@ if __name__ == "__main__":
     main(
         enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
         trajectory_shape='circle',  # 'p2p' (default), 'circle, 'triangle'
-        T=5.,
-        t0=1.,  # time to start RMSE calculation (to skip transient phase)
+        T=1.,
+        # t0=1.,  # time to start RMSE calculation (to skip transient phase)
         # ts=0.001,
-        # loops=5,
+        loops=100,
         keep_initial_guess=True,  # keep initial guess at T=0 (so all estimators look like they start at the same x0)
                                   # purely for plotting purpose
-        # save_csv=True,
+        save_csv_simulation_instance=True,
+        save_csv_estimation_error=True,
+        # save_csv_raw_data=True,
         enable_plot=True,
 
         # ---------------- Corner cases ----------------
         # time_varying_measurement_noise = True,
-        bad_model_knowledge=True,
-        time_varying_dynamics=True,
+        # bad_model_knowledge=True,
+        # time_varying_dynamics=True,
         # measurement_delay=2,    # measurement delayed by how many time steps
         # zero_measurement_noise=True,
         # zero_process_noise=True,
@@ -473,12 +512,11 @@ if __name__ == "__main__":
         # ---------------- Actual noise characteristics ----------------
         v_means=np.zeros(6),
         w_means=np.zeros(12),
-        v_stds=np.array([.09, .09, .09, .3, .3, .3])/3,    # Measurement noise ~ Gaussian (max ~ 3 std.dev.)
-        w_stds=np.array([1e-6, 1e-6, 1e-6, .5, .5, .5,  # Disturbance: sinunoidal in linear and angular accelerations
+        v_stds=np.array([.09, .09, .09, .3, .3, .3])/3,     # Measurement noise ~ Gaussian (max ~ 3 std.dev.)
+        w_stds=np.array([1e-6, 1e-6, 1e-6, .5, .5, .5,      # Disturbance: sinunoidal in linear and angular accelerations
                          1e-6, 1e-6, 1e-6, .2, .2, .2]),
-        # x0_stds=np.array([[-1., -1., -1., -.5, -.5, -.5, -.5, -.5, -.5, -1., -1., -1.],
-        #                   [1., 1., 1., .5, .5, .5, .5, .5, .5, 1., 1., 1.]]),   # Random initial guess ~ uniform distribution
-        x0_stds=np.array([[0., 0., -1., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
+        x0_stds=np.kron([[-1],[1]], [1., 1., 1., .1, .1, .1, .1, .1, .1, 1., 1., 1.]), # Random initial guess ~ uniform distribution
+        # x0_stds=np.array([[0., 0., -1., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
 
         # ---------------- Covariance matrices for EKF/MHE ----------------
         #       Override both Q,R to use these (bad) values for estimation
@@ -486,14 +524,14 @@ if __name__ == "__main__":
         #       PCIP/L1AO might work better when trusting model (high R, low Q)
         #       High Q might make L1AO converges very slowly
         #       Tuning Q: if a state converges slowly, increase Q for that state
-        # ----- good for normal case
-        # Q=np.eye(12) * 0.01,
-        # R=np.eye(6) * 0.01,
+        # ----- good for normal case (L1AO > PCIP > CVXPY > EKF) -----
+        Q=np.eye(12) * 0.01,
+        R=np.eye(6) * 0.01,
         P0=np.eye(12) * 1e-2,
-        # ----- good for bad model knowledge, fast convergence
-        Q=np.diag([.1, .1, .1, 1., 1., 100.,
-                   1., 1., 1., .1, .1, .1]),
-        R=np.diag([.01, .01, .01, .01, .01, .01]),
+        # ----- good for bad model knowledge, fast convergence -----
+        # Q=np.diag([.1, .1, .1, 1., 1., 100.,
+        #            1., 1., 1., .1, .1, .1]),
+        # R=np.diag([.01, .01, .01, .01, .01, .01]),
         # P0=np.diag([.1, .1, .1, .01, .01, .01,
         #             .1, .1, .1, .01, .01, .01]),
 
