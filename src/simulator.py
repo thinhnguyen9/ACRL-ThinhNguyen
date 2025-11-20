@@ -275,6 +275,7 @@ class Simulator():
         wp_idx = 0
         timer = 0.
         X0 = x0.copy()
+        yvec[:measurement_delay] = self.sys.getOutput(x0, vvec[0,:])
         for i in range(self.N):
             # if i % 126 == 0:
             #     vvec[i] = vvec[i]*10.   # introduce outliers

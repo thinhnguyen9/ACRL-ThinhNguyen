@@ -65,9 +65,9 @@ def main(
     )
     if bad_model_knowledge:
         drone_est = Quadrotor2(     # used for estimation
-            m                           = 1.0,
+            m                           = 1.5,
             g                           = 9.81,
-            J                           = np.diag([0.005, 0.005, 0.009])*1.0,
+            J                           = np.diag([0.005, 0.005, 0.009])*1.5,
             time_varying_mass           = time_varying_dynamics,
             mass_scale_rate_of_change   = -0.   # 0 means no change
         )
@@ -128,14 +128,15 @@ def main(
                 # time_varying_dynamics = time_varying_dynamics
         )
         # Initial estimate variation
-        x0var = rng.uniform(low=x0_stds[0], high=x0_stds[1])
-        norm_x0var = np.linalg.norm(x0var)
-        if norm_x0var == 0.:
-            x0var = np.zeros(drone.Nx)
-            x0var[0] = 1.
-            x0 = x0 + x0var
-        else:
-            x0 = x0 + x0var/norm_x0var  # normalize so that norm(e0)=1
+        if np.linalg.norm(x0_stds) > 1e-6:
+            x0var = rng.uniform(low=x0_stds[0], high=x0_stds[1])
+            norm_x0var = np.linalg.norm(x0var)
+            if norm_x0var == 0.:
+                x0var = np.zeros(drone.Nx)
+                x0var[0] = 1.
+                x0 = x0 + x0var
+            else:
+                x0 = x0 + x0var/norm_x0var  # normalize so that norm(e0)=1
         
         # Initialize estimators - must be done every loop
         if 'KF' in enabled_estimators:
@@ -490,33 +491,27 @@ if __name__ == "__main__":
     main(
         enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
         trajectory_shape='circle',  # 'p2p' (default), 'circle, 'triangle'
-        T=1.,
+        # T=100.,
         # t0=1.,  # time to start RMSE calculation (to skip transient phase)
         # ts=0.001,
-        loops=100,
+        # loops=100,
         keep_initial_guess=True,  # keep initial guess at T=0 (so all estimators look like they start at the same x0)
                                   # purely for plotting purpose
-        save_csv_simulation_instance=True,
-        save_csv_estimation_error=True,
+        # save_csv_simulation_instance=True,
+        # save_csv_estimation_error=True,
         # save_csv_raw_data=True,
         enable_plot=True,
 
-        # ---------------- Corner cases ----------------
-        # time_varying_measurement_noise = True,
-        # bad_model_knowledge=True,
-        # time_varying_dynamics=True,
-        # measurement_delay=2,    # measurement delayed by how many time steps
-        # zero_measurement_noise=True,
-        # zero_process_noise=True,
-        
         # ---------------- Actual noise characteristics ----------------
         v_means=np.zeros(6),
         w_means=np.zeros(12),
         v_stds=np.array([.09, .09, .09, .3, .3, .3])/3,     # Measurement noise ~ Gaussian (max ~ 3 std.dev.)
         w_stds=np.array([1e-6, 1e-6, 1e-6, .5, .5, .5,      # Disturbance: sinunoidal in linear and angular accelerations
                          1e-6, 1e-6, 1e-6, .2, .2, .2]),
-        x0_stds=np.kron([[-1],[1]], [1., 1., 1., .1, .1, .1, .1, .1, .1, 1., 1., 1.]), # Random initial guess ~ uniform distribution
-        # x0_stds=np.array([[0., 0., -1., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
+        # x0_stds=np.kron([[-1],[1]], [1., 1., 1., .1, .1, .1, .1, .1, .1, 1., 1., 1.]), # Random initial guess ~ uniform distribution
+        x0_stds=np.array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
+        # zero_measurement_noise=True,
+        zero_process_noise=True,
 
         # ---------------- Covariance matrices for EKF/MHE ----------------
         #       Override both Q,R to use these (bad) values for estimation
@@ -524,16 +519,9 @@ if __name__ == "__main__":
         #       PCIP/L1AO might work better when trusting model (high R, low Q)
         #       High Q might make L1AO converges very slowly
         #       Tuning Q: if a state converges slowly, increase Q for that state
-        # ----- good for normal case (L1AO > PCIP > CVXPY > EKF) -----
         Q=np.eye(12) * 0.01,
         R=np.eye(6) * 0.01,
         P0=np.eye(12) * 1e-2,
-        # ----- good for bad model knowledge, fast convergence -----
-        # Q=np.diag([.1, .1, .1, 1., 1., 100.,
-        #            1., 1., 1., .1, .1, .1]),
-        # R=np.diag([.01, .01, .01, .01, .01, .01]),
-        # P0=np.diag([.1, .1, .1, .01, .01, .01,
-        #             .1, .1, .1, .01, .01, .01]),
 
         # ---------------- MHE settings ----------------
         # mhe_horizon  = 18,              # longer horizon: lower P0 so PCIP/L1AO doesn't blow up
@@ -544,5 +532,11 @@ if __name__ == "__main__":
         lmhe2_pcip_alpha    = 1./.01,
         lmhe3_pcip_alpha    = .5/.01,
         lmhe3_l1ao_As       = -.1,
-        lmhe3_l1ao_omega    = 150.
+        lmhe3_l1ao_omega    = 150.,
+
+        # ---------------- Corner cases ----------------
+        # time_varying_measurement_noise = True,
+        # bad_model_knowledge=True,
+        # time_varying_dynamics=True,
+        measurement_delay=15,    # measurement delayed by how many time steps
     )
