@@ -19,6 +19,7 @@ from models.quadrotors import Quadrotor2
 from src.simulator import Simulator
 from src.pcip import PCIPQP
 from src.l1ao import L1AOQP
+from src.utils import rmse
 
 def main(
         enabled_estimators,
@@ -28,7 +29,7 @@ def main(
         w_stds,     # max error ~ 3 std.dev.
         x0_stds,    # Initial state ~ uniform distribution
         P0,         # initial covariance penalty
-        trajectory_shape='p2p',
+        trajectory_shape="hover",
         Q=None,     # weighting matrix, override if needed
         R=None,     # weighting matrix, override if needed
         T=1.0,
@@ -235,27 +236,27 @@ def main(
         N = len(tvec)
         if 'KF' in enabled_estimators:
             xhat_kf, kf_time = sim.run_estimation(SKF, x0)
-            rmse_kf = np.sqrt(np.mean((xvec[t0:] - xhat_kf[t0:])**2))
+            rmse_kf = rmse(xvec[t0:], xhat_kf[t0:])
             if keep_initial_guess: xhat_kf[0] = x0.copy()
         if 'EKF' in enabled_estimators:
             xhat_ekf, ekf_time = sim.run_estimation(EKF, x0)
-            rmse_ekf = np.sqrt(np.mean((xvec[t0:] - xhat_ekf[t0:])**2))
+            rmse_ekf = rmse(xvec[t0:], xhat_ekf[t0:])
             if keep_initial_guess: xhat_ekf[0] = x0.copy()
         if 'LMHE1' in enabled_estimators:
             xhat_lmhe1, lmhe1_time = sim.run_estimation(LMHE_cvxpy, x0)
-            rmse_lmhe1 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe1[t0:])**2))
+            rmse_lmhe1 = rmse(xvec[t0:], xhat_lmhe1[t0:])
             if keep_initial_guess: xhat_lmhe1[0] = x0.copy()
         if 'LMHE2' in enabled_estimators:
             xhat_lmhe2, lmhe2_time = sim.run_estimation(LMHE_pcip, x0)
-            rmse_lmhe2 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe2[t0:])**2))
+            rmse_lmhe2 = rmse(xvec[t0:], xhat_lmhe2[t0:])
             if keep_initial_guess: xhat_lmhe2[0] = x0.copy()
         if 'LMHE3' in enabled_estimators:
             xhat_lmhe3, lmhe3_time = sim.run_estimation(LMHE_pcip_l1ao, x0)
-            rmse_lmhe3 = np.sqrt(np.mean((xvec[t0:] - xhat_lmhe3[t0:])**2))
+            rmse_lmhe3 = rmse(xvec[t0:], xhat_lmhe3[t0:])
             if keep_initial_guess: xhat_lmhe3[0] = x0.copy()
         if 'NMHE' in enabled_estimators:
             xhat_nmhe, nmhe_time = sim.run_estimation(NMHE, x0)
-            rmse_nmhe = np.sqrt(np.mean((xvec[t0:] - xhat_nmhe[t0:])**2))
+            rmse_nmhe = rmse(xvec[t0:], xhat_nmhe[t0:])
             if keep_initial_guess: xhat_nmhe[0] = x0.copy()
 
         print(f"(k={t0:.0f} onwards)      RMSE\tAvg. step time (ms)")
@@ -278,7 +279,7 @@ def main(
             if 'LMHE2' in enabled_estimators:   data.append([run_id, loop+1, 'LMHE2', rmse_lmhe2, np.max(np.abs(xvec-xhat_lmhe2)), lmhe2_time*1000./N, T, ts, t0])
             if 'LMHE3' in enabled_estimators:   data.append([run_id, loop+1, 'LMHE3', rmse_lmhe3, np.max(np.abs(xvec-xhat_lmhe3)), lmhe3_time*1000./N, T, ts, t0])
             if 'NMHE' in enabled_estimators:    data.append([run_id, loop+1, 'NMHE',  rmse_nmhe,  np.max(np.abs(xvec-xhat_nmhe)),  nmhe_time*1000./N,  T, ts, t0])
-            file_path = os.path.join(os.path.dirname(__file__), 'simulation_instances.csv')
+            file_path = os.path.join(os.path.dirname(__file__), 'data/simulation_instances.csv')
             write_header = not os.path.exists(file_path)
             with open(file_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
@@ -295,7 +296,7 @@ def main(
             if 'LMHE3' in enabled_estimators:   err_lmhe3 = np.linalg.norm(xvec - xhat_lmhe3, axis=1)
             if 'NMHE'  in enabled_estimators:   err_nmhe  = np.linalg.norm(xvec - xhat_nmhe,  axis=1)
 
-            file_path = os.path.join(os.path.dirname(__file__), 'estimation_error.csv')
+            file_path = os.path.join(os.path.dirname(__file__), 'data/estimation_error.csv')
             write_header = not os.path.exists(file_path)
             with open(file_path, 'a', newline='') as csvfile:
                 writer = csv.writer(csvfile)
@@ -490,11 +491,11 @@ if __name__ == "__main__":
     """
     main(
         enabled_estimators=['EKF', 'LMHE1', 'LMHE2', 'LMHE3'],
-        trajectory_shape='circle',  # 'p2p' (default), 'circle, 'triangle'
-        # T=100.,
+        # trajectory_shape='circle',  # "hover" (default), "p2p", "circle, "triangle"
+        T=.5,
         # t0=1.,  # time to start RMSE calculation (to skip transient phase)
         # ts=0.001,
-        # loops=100,
+        # loops=5,
         keep_initial_guess=True,  # keep initial guess at T=0 (so all estimators look like they start at the same x0)
                                   # purely for plotting purpose
         # save_csv_simulation_instance=True,
@@ -508,8 +509,8 @@ if __name__ == "__main__":
         v_stds=np.array([.09, .09, .09, .3, .3, .3])/3,     # Measurement noise ~ Gaussian (max ~ 3 std.dev.)
         w_stds=np.array([1e-6, 1e-6, 1e-6, .5, .5, .5,      # Disturbance: sinunoidal in linear and angular accelerations
                          1e-6, 1e-6, 1e-6, .2, .2, .2]),
-        # x0_stds=np.kron([[-1],[1]], [1., 1., 1., .1, .1, .1, .1, .1, .1, 1., 1., 1.]), # Random initial guess ~ uniform distribution
-        x0_stds=np.array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
+        x0_stds=np.kron([[-1],[1]], [1., 1., 1., .1, .1, .1, .1, .1, .1, 1., 1., 1.]), # Random initial guess ~ uniform distribution
+        # x0_stds=np.array([[0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0.]]*2),
         # zero_measurement_noise=True,
         zero_process_noise=True,
 
@@ -538,5 +539,5 @@ if __name__ == "__main__":
         # time_varying_measurement_noise = True,
         # bad_model_knowledge=True,
         # time_varying_dynamics=True,
-        measurement_delay=15,    # measurement delayed by how many time steps
+        # measurement_delay=15,    # measurement delayed by how many time steps
     )

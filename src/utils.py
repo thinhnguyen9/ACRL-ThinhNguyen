@@ -131,3 +131,7 @@ def build_mhe_qp(
 
     return H, f
 
+def rmse(x_true, x_est):
+    err = x_true - x_est    # N x nx
+    rmse_val = np.sqrt(np.mean(np.sum(err**2, axis=1)))
+    return rmse_val

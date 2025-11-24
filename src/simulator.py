@@ -116,7 +116,7 @@ class Simulator():
     def simulate_quadrotor_lqr_control(
             self,   # for reproducible noise generation
             seed,
-            traj_mode="p2p",
+            traj_mode="hover",
             x0=None,
             xref=None,
             zero_disturbance=False,
@@ -124,15 +124,23 @@ class Simulator():
             measurement_delay=0
         ):
         """
-        traj_mode: "p2p" (point-to-point)
-                   "circle" (circular trajectory)
+        traj_mode: "hover" (stay still at x0),
+                   "p2p" (point-to-point from x0 to xref),
+                   "circle" (circular trajectory),
+                   "triangle" (aggressive with abrubt turns)
         """
         rng = np.random.default_rng(seed)
         # ----------------------- Initial & ref states -----------------------
         if self.mode != 'quadrotor':
             return
         else:
-            if traj_mode == "p2p":
+            if traj_mode == "hover":
+                if type(self.sys).__name__ == 'Quadrotor2':
+                    if x0 is None:
+                        x0 = np.array([0., 0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0.])
+                    if xref is None:
+                        xref = x0.copy()
+            elif traj_mode == "p2p":
                 if type(self.sys).__name__ == 'Quadrotor1':
                     if x0 is None:
                         x0 = np.array([ 0., 0., 0., 0., -1., 0.,
