@@ -12,12 +12,13 @@ class PCIPQP:
         self.estimate_grad_zt = estimate_grad_zt
     
     def set_QP(self, H, f):
-        if hasattr(self, 'H') and hasattr(self, 'f'):
-            self.H0 = self.H
-            self.f0 = self.f
-        else:
-            self.H0 = H
-            self.f0 = f
+        if self.estimate_grad_zt:
+            if hasattr(self, 'H') and hasattr(self, 'f'):
+                self.H0 = self.H
+                self.f0 = self.f
+            else:
+                self.H0 = H
+                self.f0 = f
         self.H = H
         self.f = f
 
@@ -25,20 +26,19 @@ class PCIPQP:
         grad_phi = self.H @ z0 + self.f
         hess_phi = self.H
 
-        diff = self.H.shape[0] - self.H0.shape[0]
-        if diff == 0:   # QP size fixed
-            grad_phi0 = self.H0 @ z0 + self.f0
-            # hess_phi0 = self.H0
-        else:   # QP size grew
-            grad_phi0 = np.hstack([
-                self.H0 @ z0[:-diff] + self.f0,
-                grad_phi[-diff:]
-            ])
-            # hess_phi0 = self.H.copy()
-            # hess_phi0[:-diff, :-diff] = self.H0.copy()
-
         # Estimate grad_zt_phi by finite difference
         if self.estimate_grad_zt:
+            diff = self.H.shape[0] - self.H0.shape[0]
+            if diff == 0:   # QP size fixed
+                grad_phi0 = self.H0 @ z0 + self.f0
+                # hess_phi0 = self.H0
+            else:   # QP size grew
+                grad_phi0 = np.hstack([
+                    self.H0 @ z0[:-diff] + self.f0,
+                    grad_phi[-diff:]
+                ])
+                # hess_phi0 = self.H.copy()
+                # hess_phi0[:-diff, :-diff] = self.H0.copy()
             grad_zt = (grad_phi - grad_phi0)/self.ts
         else:
             grad_zt = np.zeros_like(z0)

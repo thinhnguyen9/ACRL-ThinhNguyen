@@ -426,9 +426,9 @@ class MHE():
             if self.mhe_type in ["linearized_every", "nonlinear"]:  # Linearize around xhat(T|T)
                 A, B, G, C = self.model.linearize(self.xvec[-1], useq_raw[-1] if N>0 else self.us, t=tvec[-1]) # TODO: need correct u?
                 self.updateModel(A, B, G, C)
-            R_k = np.linalg.inv(Rinv_seq[-1])
-            Q_k = np.linalg.inv(Qinv_seq[-1])
-            L = P0 @ self.C.T @ np.linalg.inv(R_k + self.C @ P0 @ self.C.T)
+            # R_k = np.linalg.inv(Rinv_seq[-1])
+            # Q_k = np.linalg.inv(Qinv_seq[-1])
+            L = P0 @ self.C.T @ np.linalg.inv(R_seq[-1] + self.C @ P0 @ self.C.T)
             P = P0 - L @ self.C @ P0    # P(T|T)
             if T > 0:
                 self.Pvec1 = np.concatenate((self.Pvec1, P.reshape((1, self.Nx, self.Nx))), axis=0)
@@ -437,7 +437,7 @@ class MHE():
                 self.Pvec1[0] = P
 
             # Calculate P(T+1|T) from P(T|T)
-            P = self.G @ Q_k @ self.G.T + self.A @ P @ self.A.T  # P(T+1|T)
+            P = self.G @ Q_seq[-1] @ self.G.T + self.A @ P @ self.A.T  # P(T+1|T)
             self.Pvec = np.concatenate((self.Pvec, P.reshape((1, self.Nx, self.Nx))), axis=0)
             self.Pvec = self.Pvec[-self.N-1:]
 
