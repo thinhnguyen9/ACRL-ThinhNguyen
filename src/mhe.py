@@ -246,6 +246,12 @@ class MHE():
                 # Variable z = [x0, w0...w(N-1)]
                 z = cp.Variable(((N+1)*self.Nx,))
                 constraints = []
+                # constraints.append(z[0] >= 0.)
+                # constraints.append(z[1] >= 0.)
+                # constraints.append(z[2] <= 0.)
+                # constraints.append(z[8] >= 0.)
+                # constraints.append(z[8] >= -np.pi/36)
+                # constraints.append(z[8] <= np.pi/36)
                 cost = 0.5 * cp.quad_form(z, cp.psd_wrap(H)) + f @ z
 
                 prob = cp.Problem(cp.Minimize(cost), constraints)

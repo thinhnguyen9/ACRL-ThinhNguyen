@@ -261,13 +261,27 @@ class Simulator():
                 #                      0., 0., 0., 1.5*np.pi, .9*np.pi, .4*np.pi])  # external moments acting on pd, qd, rd
                 # w_phase = np.array([ 0., 0., 0., np.pi/4, np.pi/3, np.pi/5,
                 #                      0., 0., 0., 0., np.pi/8, np.pi/7])
-                rand_omega = rng.uniform(low=.5*np.pi, high=3.*np.pi, size=(6,))
-                rand_phase = rng.uniform(low=0.,       high=2.*np.pi, size=(6,))
-                w_omega = np.zeros((12,))
-                w_phase = np.zeros((12,))
-                w_omega[3:6], w_omega[9:12] = rand_omega[0:3], rand_omega[3:6]
-                w_phase[3:6], w_phase[9:12] = rand_phase[0:3], rand_phase[3:6]
-            wvec = self.w_means + self.w_stds_fixed*np.sin(w_omega*self.tvec.reshape(self.N,1) + w_phase)
+                rand_omega1 = rng.uniform(low=.5*np.pi, high=3.*np.pi, size=(6,))
+                rand_omega2 = rng.uniform(low=.5*np.pi, high=3.*np.pi, size=(6,))
+                rand_omega3 = rng.uniform(low=.5*np.pi, high=3.*np.pi, size=(6,))
+                rand_phase1 = rng.uniform(low=0.,       high=2.*np.pi, size=(6,))
+                rand_phase2 = rng.uniform(low=0.,       high=2.*np.pi, size=(6,))
+                rand_phase3 = rng.uniform(low=0.,       high=2.*np.pi, size=(6,))
+                w_omega1 = np.zeros((12,))
+                w_omega2 = np.zeros((12,))
+                w_omega3 = np.zeros((12,))
+                w_phase1 = np.zeros((12,))
+                w_phase2 = np.zeros((12,))
+                w_phase3 = np.zeros((12,))
+                w_omega1[3:6],  w_omega2[3:6],  w_omega3[3:6]  = rand_omega1[0:3], rand_omega2[0:3], rand_omega3[0:3]
+                w_omega1[9:12], w_omega2[9:12], w_omega3[9:12] = rand_omega1[3:6], rand_omega2[3:6], rand_omega3[3:6]
+                w_phase1[3:6],  w_phase2[3:6],  w_phase3[3:6]  = rand_phase1[0:3], rand_phase2[0:3], rand_phase3[0:3]
+                w_phase1[9:12], w_phase2[9:12], w_phase3[9:12] = rand_phase1[3:6], rand_phase2[3:6], rand_phase3[3:6]
+            wvec = self.w_means + self.w_stds_fixed/3*(
+                      np.sin(w_omega1*self.tvec.reshape(self.N,1) + w_phase1)
+                    + np.sin(w_omega2*self.tvec.reshape(self.N,1) + w_phase2)
+                    + np.sin(w_omega3*self.tvec.reshape(self.N,1) + w_phase3)
+                )
         
         # Measurement noise - Gaussian/uniform, high-frequency
         if zero_noise:

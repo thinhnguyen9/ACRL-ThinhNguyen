@@ -51,7 +51,9 @@ def main(
         enable_plot=False,
         measurement_delay=0,
         lmhe2_pcip_alpha=1./.01,
+        lmhe2_pcip_gradzt=True,
         lmhe3_pcip_alpha=1./.01,
+        lmhe3_pcip_gradzt=True,
         lmhe3_l1ao_As=-.1,
         lmhe3_l1ao_omega=50.
     ):
@@ -129,15 +131,16 @@ def main(
                 # time_varying_dynamics = time_varying_dynamics
         )
         # Initial estimate variation
+        x0norm = 10.
         if np.linalg.norm(x0_stds) > 1e-6:
             x0var = rng.uniform(low=x0_stds[0], high=x0_stds[1])
             norm_x0var = np.linalg.norm(x0var)
             if norm_x0var == 0.:
                 x0var = np.zeros(drone.Nx)
-                x0var[0] = 1.
+                x0var[0] = x0norm
                 x0 = x0 + x0var
             else:
-                x0 = x0 + x0var/norm_x0var  # normalize so that norm(e0)=1
+                x0 = x0 + x0norm*x0var/norm_x0var  # normalize so that norm(e0)=1
         
         # Initialize estimators - must be done every loop
         if 'KF' in enabled_estimators:
@@ -174,7 +177,7 @@ def main(
             lmhe2_pcip_obj = PCIPQP(
                 alpha   = lmhe2_pcip_alpha,
                 ts      = ts,
-                estimate_grad_zt = True
+                estimate_grad_zt = lmhe2_pcip_gradzt
             )
             LMHE_pcip = MHE(
                 model           = drone_est,
@@ -194,7 +197,7 @@ def main(
             lmhe3_pcip_obj = PCIPQP(
                 alpha   = lmhe3_pcip_alpha,
                 ts      = ts,
-                estimate_grad_zt = True
+                estimate_grad_zt = lmhe3_pcip_gradzt
             )
             lmhe3_l1ao_obj = L1AOQP(
                 ts          = ts,
@@ -457,6 +460,7 @@ def main(
             if 'LMHE1' in enabled_estimators:   plt.plot(tvec, err_lmhe1, color='tab:blue', ls='-', lw=1.5, label='LMHE1')
             if 'LMHE2' in enabled_estimators:   plt.plot(tvec, err_lmhe2, color='tab:orange', ls='-', lw=1.5, label='LMHE2')
             if 'LMHE3' in enabled_estimators:   plt.plot(tvec, err_lmhe3, color='tab:green', ls='-', lw=1.5, label='LMHE3')
+            # plt.yscale('log')
             plt.grid()
             plt.xlabel('Time (s)')
             plt.ylabel(r'$\|x - \hat{x}\|$', fontsize=10)
@@ -531,7 +535,9 @@ if __name__ == "__main__":
 
         # ---------------- TV solvers ----------------
         lmhe2_pcip_alpha    = 1./.01,
+        lmhe2_pcip_gradzt   = True,     # False: reduce to Newton method
         lmhe3_pcip_alpha    = .5/.01,
+        lmhe3_pcip_gradzt   = True,     # False: reduce to Newton method
         lmhe3_l1ao_As       = -.1,
         lmhe3_l1ao_omega    = 150.,
 
