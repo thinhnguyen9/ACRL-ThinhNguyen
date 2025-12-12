@@ -129,7 +129,8 @@ def build_mhe_qp(
         H += - AT_CT_W @ Cbar @ Ax
         f += - AT_CT_W @ (Cbar @ matb - ybar.flatten())
 
-    return H, f
+    # [x0...xN]' = matA @ z + matb
+    return H, f, matA
 
 def rmse(x_true, x_est):
     err = x_true - x_est    # N x nx

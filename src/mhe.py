@@ -1,7 +1,10 @@
 import numpy as np
 from math import sin, cos   
 import cvxpy as cp
-from scipy.optimize import minimize, LinearConstraint
+import osqp
+from scipy import sparse
+from cvxopt import matrix, solvers
+# from scipy.optimize import minimize, LinearConstraint
 import copy
 from src.utils import build_mhe_qp_with_dyn_constraints, build_mhe_qp_with_dyn_constraints_lagrangian, build_mhe_qp
 
@@ -11,7 +14,8 @@ class MHE():
     def __init__(
             self, model, ts, N, X0, P0, xs, us,
             mhe_type="linearized_once", mhe_update="filtering", prior_method="zero",
-            solver=None, pcip_obj=None, l1ao_obj=None):
+            xmin=None, xmax=None,
+            solver="cvxpy", pcip_obj=None, l1ao_obj=None):
         """
         Args:
             model: dynamical model object
@@ -29,7 +33,12 @@ class MHE():
             prior_method: "zero" to use zero prior weighting,
                           "ekf" to use the EKF covariance update,
                           "uniform" to use a fixed prior weighting P0
-            solver: "pcip" to use PCIPQP solver, None to use CVXPY/scipy.optimize (default)
+            xmin, xmax: state constraints (shape: (Nx,)), optional
+            solver: "cvxpy" to use CVXPY parser with OSQP (default),
+                    "osqp" to use OSQP directly without parser (faster) (sparse QP),
+                    "cvxopt" to use cvxopt directly (dense QP),
+                    "pcip" to use PCIPQP solver,
+                    "pcip_l1ao" to use PCIPQP + L1AOQP
         """
         self.model = model
         self.Nx = model.Nx  # states
@@ -46,11 +55,16 @@ class MHE():
             raise ValueError("mhe_update must be 'filtering', 'smoothing', or 'smoothing_naive'.")
         if prior_method not in ["zero", "ekf", "uniform"]:
             raise ValueError("prior_method must be 'zero', 'ekf', or 'uniform'.")
-        if solver not in [None, "pcip", "pcip_l1ao"]:
-            raise ValueError("solver must be None (default), 'pcip', or 'pcip_l1ao'.")
+        if solver not in ["cvxpy", "osqp", "cvxopt", "pcip", "pcip_l1ao"]:
+            raise ValueError("solver must be one of cvxpy/osqp/cvxopt/pcip/pcip_l1ao.")
         self.mhe_type = mhe_type
         self.mhe_update = mhe_update
         self.prior_method = prior_method
+        if xmin is not None and xmax is not None:
+            self.ineq_constraints = True
+            self.xmin, self.xmax = xmin, xmax
+        else:
+            self.ineq_constraints = False
         self.solver = solver
         A, B, G, C = self.model.linearize(xs, us)
         self.updateModel(A, B, G, C)
@@ -226,13 +240,20 @@ class MHE():
                 P0_inv = np.zeros((self.Nx, self.Nx))
             else:
                 P0_inv = np.linalg.inv(P0)
-            H, f = build_mhe_qp(A_seq, B_seq, G_seq, C_seq, Qinv_seq[:-1], Rinv_seq,
-                                X0, P0_inv, u, y,
-                                smoothing_adjustment=(self.mhe_update=="smoothing"),
-                                Q_seq=Q_seq,
-                                R_seq=R_seq)
+            H, f, matA = build_mhe_qp(
+                A_seq, B_seq, G_seq, C_seq, Qinv_seq[:-1], Rinv_seq, X0, P0_inv, u, y,
+                smoothing_adjustment=(self.mhe_update=="smoothing"),
+                Q_seq=Q_seq, R_seq=R_seq
+            )
+
+            # State constraints
+            if self.ineq_constraints:
+                # [dx0...dxN] = [x0...xN] - xnom = matA @ z
+                # [x0...xN] in [xmin, xmax]  <=>  matA @ z = [dx0...dxN] in [xmin, xmax] - xnom
+                zmin = np.kron(np.ones((N+1,)), self.xmin) - xnom.flatten()
+                zmax = np.kron(np.ones((N+1,)), self.xmax) - xnom.flatten()     # zmin <= matA @ z <= zmax
             
-            if self.solver is None:
+            if self.solver == "cvxpy":
                 """ # Dynamics as equality constraints
                 H, f, A_eq, b_eq = build_mhe_qp_with_dyn_constraints(A_seq, B_seq, G_seq, C_seq, self.Q_inv, self.R_inv,
                                                                      X0, P0_inv, u, y)
@@ -267,6 +288,30 @@ class MHE():
                 # Result
                 # xvec = z.value[0:(N+1)*self.Nx].reshape((N+1, self.Nx))
                 z = z.value
+            
+            elif self.solver == "osqp": # TODO: same tolerances for all solvers?
+                prob = osqp.OSQP()
+                prob.setup(
+                    P=sparse.csc_matrix(H),
+                    q=f,
+                    A=sparse.csc_matrix(matA) if self.ineq_constraints else None,
+                    l=zmin if self.ineq_constraints else None,
+                    u=zmax if self.ineq_constraints else None,
+                    warm_start=True, verbose=False
+                )
+                res = prob.solve()
+                if res.info.status != 'solved':
+                    raise ValueError('OSQP did not solve the problem! Time step: ' + str(T))
+                z = res.x
+
+            elif self.solver == "cvxopt":
+                solvers.options['show_progress'] = False
+                sol = solvers.qp(
+                    P=matrix(H), q=matrix(f),
+                    G=matrix(np.vstack((-matA, matA))) if self.ineq_constraints else None,
+                    h=matrix(np.hstack((-zmin, zmax))) if self.ineq_constraints else None
+                )
+                z = np.array(sol['x']).flatten()
             
             elif self.solver in ["pcip", "pcip_l1ao"]: # only dynamics constraints!!
                 """ # Dynamics as equality constraints
